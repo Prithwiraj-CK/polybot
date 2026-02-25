@@ -1,0 +1,23 @@
+{
+  "name": "polybot",
+  "version": "1.0.0",
+  "description": "This production-grade Discord bot enables users to interact with Polymarket markets directly from Discord. Users can query market information, check virtual balances, view trade history, and place small demo trades using a house-funded wallet. The bot leverages advanced AI for natural language understanding, ensuring a seamless and intuitive user experience.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Prithwiraj-CK/polybot.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Prithwiraj-CK/polybot/issues"
+  },
+  "homepage": "https://github.com/Prithwiraj-CK/polybot#readme",
+  "dependencies": {
+    "ethers": "^6.16.0"
+  }
+}

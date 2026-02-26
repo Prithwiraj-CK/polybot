@@ -32,18 +32,12 @@ export function createAiReadExplainer(): (input: ReadExplainerInput) => Promise<
 		const contextBlock = buildMarketContext(input);
 		const fullPrompt = READ_SYSTEM_PROMPT + '\n\nCurrent market context:\n' + contextBlock;
 
-		console.log('\n[gemini] --- SYSTEM PROMPT ---');
-		console.log(fullPrompt);
-		console.log('[gemini] ----------------------\n');
-
 		const text = await callGemini({
 			contents: input.message,
 			systemInstruction: fullPrompt,
 			temperature: 0.4,
 			maxOutputTokens: 500,
 		});
-
-		console.log(`[gemini] Response: "${text}"`);
 
 		if (!text) {
 			return fallbackExplainer(input);

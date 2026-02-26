@@ -69,7 +69,8 @@ export class AccountLinkPersistenceService {
 				polymarketAccountId,
 				linkedAtMs: nowMs,
 			};
-		} catch {
+		} catch (err) {
+			console.error('❌ AccountLinkPersistenceService.persistLink error:', err);
 			return {
 				ok: false,
 				errorCode: 'STORE_ERROR',

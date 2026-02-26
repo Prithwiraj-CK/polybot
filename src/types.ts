@@ -18,6 +18,9 @@ export type UsdCents = number & { readonly __brand: 'UsdCents' };
 /** Supported binary outcomes for Polymarket-style markets. */
 export type Outcome = 'YES' | 'NO';
 
+/** Trade action: BUY to enter a position, SELL to exit. */
+export type TradeAction = 'BUY' | 'SELL';
+
 /** Canonical user record used across Discord and backend layers. */
 export interface User {
   /** Stable Discord user identifier. */
@@ -63,6 +66,8 @@ export interface TradeIntent {
   readonly marketId: MarketId;
   /** Intended side of the bet. */
   readonly outcome: Outcome;
+  /** BUY to enter, SELL to exit. Defaults to BUY if omitted. */
+  readonly action?: TradeAction;
   /** User-requested amount in cents (untrusted until validated). */
   readonly amountCents: UsdCents;
 }
@@ -75,6 +80,8 @@ export interface TradeRequest {
   readonly market: Market;
   /** Validated trade side. */
   readonly outcome: Outcome;
+  /** BUY to enter, SELL to exit. */
+  readonly action: TradeAction;
   /** Validated amount in cents after all limit checks. */
   readonly amountCents: UsdCents;
   /** Idempotency key to prevent duplicate execution. */
@@ -178,6 +185,7 @@ export type AgentOutput =
       readonly userId: DiscordUserId;
       readonly marketId: MarketId;
       readonly outcome: Outcome;
+      readonly action?: TradeAction;
       readonly amountCents: UsdCents;
       readonly rawText?: string;
     }

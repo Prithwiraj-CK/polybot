@@ -682,10 +682,6 @@ async function extractSearchKeywords(message: string): Promise<string> {
 		return stripped;
 	}
 
-	if (!hasGeminiKeys()) {
-		return message;
-	}
-
 	try {
 		const text = await callGemini({
 			contents: stripped,    // use pre-stripped string — less noise for AI

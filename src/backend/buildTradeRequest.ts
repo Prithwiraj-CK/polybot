@@ -57,6 +57,7 @@ export function buildTradeRequest(
 		identity: context.identity,
 		market: context.market,
 		outcome: agentOutput.outcome,
+		action: agentOutput.action ?? 'BUY',
 		amountCents: agentOutput.amountCents,
 		idempotencyKey,
 		requestedAtMs: context.nowMs,

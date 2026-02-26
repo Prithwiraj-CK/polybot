@@ -30,6 +30,13 @@ const QUESTION_PATTERN =
 	/\?|^\s*(what|why|how|when|where|who|which|can|could|would|should|is|are|do|does|did)\b/i;
 
 /**
+ * Explicit non-trade write intents that should still route to WRITE.
+ * These commands are user-account scoped and require deterministic handling.
+ */
+const ACCOUNT_WRITE_PATTERN =
+	/\b(balance|portfolio|positions?|trade\s+history|history|connect\s+account|verify|disconnect|status|linked\s+wallet|recent\s+trades?|past\s+\w+\s+trades?|last\s+\w+\s+trades?)\b/i;
+
+/**
  * Classifies an incoming Discord message into READ or WRITE pipeline.
  *
  * Policy:
@@ -44,6 +51,10 @@ export function classifyMessageIntent(message: string): MessageIntentPipeline {
 
 	if (normalized.length === 0) {
 		return 'READ';
+	}
+
+	if (ACCOUNT_WRITE_PATTERN.test(normalized)) {
+		return 'WRITE';
 	}
 
 	if (QUESTION_PATTERN.test(normalized)) {

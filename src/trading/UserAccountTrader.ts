@@ -3,6 +3,7 @@ import type {
 	DiscordUserId,
 	MarketId,
 	PolymarketAccountId,
+	TradeAction,
 	TradeErrorCode,
 	TradeRequest,
 	TradeResult,
@@ -17,6 +18,7 @@ import type {
 export interface ExecuteTradeParams {
 	readonly marketId: MarketId;
 	readonly outcome: TradeRequest['outcome'];
+	readonly action: TradeAction;
 	readonly amountCents: UsdCents;
 	readonly idempotencyKey: string;
 }
@@ -59,7 +61,12 @@ export interface PolymarketExecutionGateway {
  * - Keeping responsibilities narrow makes failure handling predictable and auditable.
  */
 export class UserAccountTrader implements Trader {
-	public constructor(private readonly gateway: PolymarketExecutionGateway) {}
+	public constructor(
+		private readonly gateway: PolymarketExecutionGateway,
+		private readonly resolveAccountId: (
+			discordUserId: DiscordUserId,
+		) => Promise<PolymarketAccountId | null>,
+	) {}
 
 	/**
 	 * Executes a validated request in the context of the user's Polymarket account.
@@ -72,6 +79,7 @@ export class UserAccountTrader implements Trader {
 				{
 					marketId: request.market.id,
 					outcome: request.outcome,
+					action: request.action,
 					amountCents: request.amountCents,
 					idempotencyKey: request.idempotencyKey,
 				},
@@ -101,8 +109,27 @@ export class UserAccountTrader implements Trader {
 	 * Upstream components decide when and why this read should be called.
 	 */
 	public async getBalance(userId: DiscordUserId): Promise<Balance> {
-		void userId;
-		throw new Error('Not implemented: account resolution for getBalance');
+		const accountId = await this.resolveAccountId(userId);
+
+		if (!accountId) {
+			return {
+				userId,
+				availableCents: 0 as Balance['availableCents'],
+				spentTodayCents: 0 as Balance['spentTodayCents'],
+				remainingDailyLimitCents: 0 as Balance['remainingDailyLimitCents'],
+				asOfMs: Date.now(),
+			};
+		}
+
+		const accountBalance = await this.gateway.getBalanceForAccount(accountId);
+
+		return {
+			userId,
+			availableCents: accountBalance.availableCents,
+			spentTodayCents: accountBalance.spentTodayCents,
+			remainingDailyLimitCents: accountBalance.remainingDailyLimitCents,
+			asOfMs: accountBalance.asOfMs,
+		};
 	}
 
 	/**
@@ -110,9 +137,22 @@ export class UserAccountTrader implements Trader {
 	 * Account resolution wiring is a TODO boundary outside this execution file.
 	 */
 	public async getRecentTrades(userId: DiscordUserId, limit: number): Promise<readonly TradeResult[]> {
-		void userId;
-		void limit;
-		throw new Error('Not implemented: account resolution for getRecentTrades');
+		const accountId = await this.resolveAccountId(userId);
+		if (!accountId) {
+			return [];
+		}
+
+		const trades = await this.gateway.getRecentTradesForAccount(accountId, limit);
+		return trades.map((trade) => {
+			if (!trade.ok) {
+				return trade;
+			}
+
+			return {
+				...trade,
+				userId,
+			};
+		});
 	}
 }
 

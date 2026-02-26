@@ -1,5 +1,5 @@
 import { callGemini, hasGeminiKeys } from '../read/geminiClient';
-import type { AgentOutput, DiscordUserId, MarketId, Outcome, UsdCents } from '../types';
+import type { AgentOutput, DiscordUserId, MarketId, Outcome, TradeAction, UsdCents } from '../types';
 
 /**
  * This file is intentionally limited to AI intent parsing only.
@@ -28,6 +28,7 @@ const SYSTEM_PROMPT = [
 	'Do not invent marketId, outcome, or amountCents.',
 	'Allowed intents: place_bet, get_balance, get_trade_history, query_market.',
 	'Use amountCents only when explicitly present in user text.',
+	'For place_bet, include action: "BUY" or "SELL". Default to "BUY" if user says bet/buy/place. Use "SELL" only when the user explicitly says sell/exit/close.',
 	'Echo userId exactly as provided by the input payload.',
 ].join(' ');
 
@@ -145,7 +146,12 @@ function isAgentOutput(value: unknown): value is AgentOutput {
 			return false;
 		}
 
-		if (!hasOnlyKeys(value, ['intent', 'userId', 'marketId', 'outcome', 'amountCents', 'rawText'])) {
+		// action is optional; if present it must be BUY or SELL
+		if (value.action !== undefined && value.action !== 'BUY' && value.action !== 'SELL') {
+			return false;
+		}
+
+		if (!hasOnlyKeys(value, ['intent', 'userId', 'marketId', 'outcome', 'action', 'amountCents', 'rawText'])) {
 			return false;
 		}
 
@@ -224,6 +230,7 @@ function toBrandedAgentOutput(value: AgentOutput): AgentOutput {
 			userId: asDiscordUserId(value.userId),
 			marketId: asMarketId(value.marketId),
 			outcome: asOutcome(value.outcome),
+			action: (value.action ?? 'BUY') as TradeAction,
 			amountCents: asUsdCents(value.amountCents),
 			rawText: value.rawText,
 		};

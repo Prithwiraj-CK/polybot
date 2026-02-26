@@ -10,6 +10,8 @@ import {
 import { AccountLinkVerificationService } from './auth/AccountLinkVerificationService';
 import { EvmSignatureVerifier } from './auth/EvmSignatureVerifier';
 import { PolymarketReadService, type PolymarketReadProvider } from './read/PolymarketReadService';
+import { PolymarketApiReadProvider } from './read/PolymarketApiReadProvider';
+import { createAiReadExplainer } from './read/aiReadExplainer';
 import { UserAccountTrader, type PolymarketExecutionGateway } from './trading/UserAccountTrader';
 import type { Balance, DiscordUserId, Market, PolymarketAccountId, TradeResult } from './types';
 
@@ -70,18 +72,24 @@ const MARKET_FIXTURES: readonly Market[] = [
     question: 'Will BTC close above $100k by Dec 31, 2026?',
     status: 'active',
     outcomes: ['YES', 'NO'],
+    outcomePrices: [0.65, 0.35],
+    volume: 1500000,
   },
   {
     id: 'market-2' as Market['id'],
     question: 'Will ETH ETF inflows be positive this quarter?',
     status: 'active',
     outcomes: ['YES', 'NO'],
+    outcomePrices: [0.42, 0.58],
+    volume: 800000,
   },
   {
     id: 'market-3' as Market['id'],
     question: 'Will the Fed cut rates in the next meeting?',
     status: 'paused',
     outcomes: ['YES', 'NO'],
+    outcomePrices: [0.3, 0.7],
+    volume: 2200000,
   },
 ];
 
@@ -155,6 +163,16 @@ export const accountLinkVerificationService = new AccountLinkVerificationService
   new EvmSignatureVerifier(),
 );
 
-export const readService = new PolymarketReadService(new InMemoryPolymarketReadProvider());
+/**
+ * READ pipeline — works without any backend.
+ * Uses the live Polymarket Gamma API (public, no auth) for market data
+ * and Gemini for conversational responses.
+ */
+export const readService = new PolymarketReadService(new PolymarketApiReadProvider());
+export const aiReadExplainer = createAiReadExplainer();
 
+/**
+ * WRITE pipeline — requires backend (Supabase) for production.
+ * Currently wired with in-memory stubs for local development.
+ */
 export const trader = new UserAccountTrader(new StubPolymarketExecutionGateway());

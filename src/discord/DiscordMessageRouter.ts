@@ -68,9 +68,14 @@ export class DiscordMessageRouter {
 	}
 
 	private async handleRead(message: string): Promise<string> {
+		console.log(`[router] handleRead: "${message}"`);
 		const liveMarkets = await this.deps.readService.listLiveMarkets();
+		console.log(`[router] Live markets: ${liveMarkets.length}`);
 		const searchResults = await this.deps.readService.searchMarketsByText(message);
-		const sampleSummaries = await summarizeUpToThree(this.deps.readService, liveMarkets);
+		console.log(`[router] Search results: ${searchResults.length}`);
+		const sampleSource = searchResults.length > 0 ? searchResults : liveMarkets;
+		const sampleSummaries = await summarizeUpToThree(this.deps.readService, sampleSource);
+		console.log(`[router] Sample summaries: ${sampleSummaries.map(s => s.question).join(' | ')}`);
 
 		return this.readExplainer({
 			message,

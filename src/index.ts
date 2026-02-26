@@ -12,6 +12,7 @@ import {
   accountLinkPersistenceService,
   trader,
   readService,
+  aiReadExplainer,
 } from './wire';
 import { createBuildValidationContext } from './backend/buildValidationContext';
 
@@ -35,6 +36,7 @@ const router = new DiscordMessageRouter({
   trader,
   buildValidationContext,
   nowMs: () => Date.now(),
+  readExplainer: aiReadExplainer,
 });
 
 // ---- Ready ----
@@ -46,8 +48,12 @@ client.once('ready', () => {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
+  // Only respond when the bot is @mentioned
+  if (!message.mentions.has(client.user!)) return;
+
   const discordUserId = message.author.id as DiscordUserId;
-  const text = message.content;
+  // Strip the bot mention from the message text
+  const text = message.content.replace(/<@!?\d+>/g, '').trim();
 
   try {
     const isAccountCommand =

@@ -47,6 +47,10 @@ export interface Market {
   readonly status: 'active' | 'closed' | 'paused';
   /** Allowed outcomes for this market. */
   readonly outcomes: readonly Outcome[];
+  /** Probability prices per outcome (0-1), aligned with outcomes array. */
+  readonly outcomePrices: readonly number[];
+  /** Total trading volume in USD. */
+  readonly volume: number;
 }
 
 /** AI-parsed trade intent before deterministic validation. */

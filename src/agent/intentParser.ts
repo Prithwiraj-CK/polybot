@@ -1,3 +1,4 @@
+import { callGemini, hasGeminiKeys } from '../read/geminiClient';
 import type { AgentOutput, DiscordUserId, MarketId, Outcome, UsdCents } from '../types';
 
 /**
@@ -17,7 +18,6 @@ const SUPPORTED_INTENTS = new Set([
 
 /**
  * System prompt hard-restricts the model to NLU only and strict JSON output.
- * This is defense-in-depth; deterministic validation still happens below.
  */
 const SYSTEM_PROMPT = [
 	'You are an intent parser for a financial Discord bot.',
@@ -32,18 +32,6 @@ const SYSTEM_PROMPT = [
 ].join(' ');
 
 /**
- * Minimal shape for the OpenAI chat completion response that this parser needs.
- * Keeping this local avoids importing SDK-specific types.
- */
-type ChatCompletionResponse = {
-	choices?: Array<{
-		message?: {
-			content?: string | null;
-		};
-	}>;
-};
-
-/**
  * Entry point for parsing raw Discord text into a strict AgentOutput union.
  * Returns null on any failure to keep the untrusted layer fail-closed.
  */
@@ -51,146 +39,34 @@ export async function parseIntent(
 	rawMessage: string,
 	userId: DiscordUserId,
 ): Promise<AgentOutput | null> {
-	/**
-	 * Reject obviously invalid inputs early.
-	 * This is input hygiene, not business validation.
-	 */
 	if (typeof rawMessage !== 'string' || rawMessage.trim().length === 0) {
 		return null;
 	}
 
-	/**
-	 * If no API key exists, parser cannot call OpenAI; fail safely.
-	 */
-	const env =
-		(globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
-	const apiKey = env.OPENAI_API_KEY;
-	if (!apiKey) {
+	if (!hasGeminiKeys()) {
 		return null;
 	}
 
-	/**
-	 * Choose model via env for deploy-time control.
-	 * Default stays explicit to avoid hidden behavior.
-	 */
-	const model = env.OPENAI_MODEL ?? 'gpt-5.3-mini';
-
-	/**
-	 * Build a strict schema so the model is constrained to expected JSON structure.
-	 * Even with schema constraints, we still re-validate output deterministically.
-	 */
-	const schema = {
-		name: 'agent_output',
-		strict: true,
-		schema: {
-			anyOf: [
-				{ type: 'null' },
-				{
-					type: 'object',
-					properties: {
-						intent: { enum: ['place_bet'] },
-						userId: { type: 'string' },
-						marketId: { type: 'string' },
-						outcome: { enum: ['YES', 'NO'] },
-						amountCents: { type: 'number' },
-						rawText: { type: 'string' },
-					},
-					required: ['intent', 'userId', 'marketId', 'outcome', 'amountCents'],
-					additionalProperties: false,
-				},
-				{
-					type: 'object',
-					properties: {
-						intent: { enum: ['get_balance'] },
-						userId: { type: 'string' },
-						rawText: { type: 'string' },
-					},
-					required: ['intent', 'userId'],
-					additionalProperties: false,
-				},
-				{
-					type: 'object',
-					properties: {
-						intent: { enum: ['get_trade_history'] },
-						userId: { type: 'string' },
-						limit: { type: 'number' },
-						rawText: { type: 'string' },
-					},
-					required: ['intent', 'userId'],
-					additionalProperties: false,
-				},
-				{
-					type: 'object',
-					properties: {
-						intent: { enum: ['query_market'] },
-						userId: { type: 'string' },
-						marketId: { type: 'string' },
-						query: { type: 'string' },
-						rawText: { type: 'string' },
-					},
-					required: ['intent', 'userId'],
-					additionalProperties: false,
-				},
-			],
-		},
-	} as const;
-
-	/**
-	 * Send only parsing context to OpenAI; no credentials, no execution data.
-	 */
-	const body = {
-		model,
-		messages: [
-			{ role: 'system', content: SYSTEM_PROMPT },
-			{
-				role: 'user',
-				content: JSON.stringify({
-					userId,
-					message: rawMessage,
-					instruction:
-						'Return JSON null if ambiguous or missing required fields; otherwise return one valid intent object.',
-				}),
-			},
-		],
-		response_format: {
-			type: 'json_schema',
-			json_schema: schema,
-		},
-		temperature: 0,
-	};
+	const userPayload = JSON.stringify({
+		userId,
+		message: rawMessage,
+		instruction:
+			'Return JSON null if ambiguous or missing required fields; otherwise return one valid intent object.',
+	});
 
 	try {
-		/**
-		 * Network call is isolated in try/catch so this layer never throws upward.
-		 */
-		const response = await fetch('https://api.openai.com/v1/chat/completions', {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				Authorization: `Bearer ${apiKey}`,
-			},
-			body: JSON.stringify(body),
+		const content = await callGemini({
+			contents: userPayload,
+			systemInstruction: SYSTEM_PROMPT,
+			responseMimeType: 'application/json',
+			temperature: 0,
+			maxOutputTokens: 300,
 		});
 
-		/**
-		 * Non-2xx means parser cannot trust an output payload; fail closed.
-		 */
-		if (!response.ok) {
+		if (!content) {
 			return null;
 		}
 
-		/**
-		 * Parse provider response shape safely without assumptions.
-		 */
-		const payload = (await response.json()) as ChatCompletionResponse;
-		const content = payload.choices?.[0]?.message?.content;
-		if (typeof content !== 'string' || content.trim().length === 0) {
-			return null;
-		}
-
-		/**
-		 * Parse model text as JSON; malformed JSON is treated as failure.
-		 */
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(content);
@@ -198,32 +74,20 @@ export async function parseIntent(
 			return null;
 		}
 
-		/**
-		 * Model can explicitly return null for ambiguity or missing required fields.
-		 */
 		if (parsed === null) {
 			return null;
 		}
 
-		/**
-		 * Deterministic runtime validation ensures exact AgentOutput conformance.
-		 */
 		if (!isAgentOutput(parsed)) {
 			return null;
 		}
 
-		/**
-		 * Enforce identity consistency so parser cannot switch users.
-		 */
 		if (parsed.userId !== userId) {
 			return null;
 		}
 
 		return toBrandedAgentOutput(parsed);
 	} catch {
-		/**
-		 * Any runtime/network/provider error must not bubble; return null safely.
-		 */
 		return null;
 	}
 }

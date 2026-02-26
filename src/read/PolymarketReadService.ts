@@ -32,6 +32,10 @@ export interface MarketSummary {
 	readonly outcomes: readonly Outcome[];
 	/** Count of declared outcomes for quick display/inspection. */
 	readonly outcomeCount: number;
+	/** Probability prices per outcome (0-1). */
+	readonly outcomePrices: readonly number[];
+	/** Total trading volume in USD. */
+	readonly volume: number;
 }
 
 /**
@@ -84,6 +88,8 @@ export class PolymarketReadService {
 			status: market.status,
 			outcomes: market.outcomes,
 			outcomeCount: market.outcomes.length,
+			outcomePrices: market.outcomePrices,
+			volume: market.volume,
 		};
 	}
 }

@@ -1,1 +1,2 @@
-// Discord bot entrypoint (implementation to be added)
+// This file is intentionally empty.
+// Bot entrypoint logic lives in src/index.ts.

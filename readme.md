@@ -1,93 +1,131 @@
-# Polymarket Discord Bot
+# PolyBot — Polymarket Discord Bot
 
-## Overview
+A Discord bot that answers questions about [Polymarket](https://polymarket.com) prediction markets using live data and AI.
 
-Polybot is a Discord bot that lets users **query live Polymarket markets** and **place trades through their own linked Polymarket account** — all via natural language in Discord.
+**@mention the bot** in any channel and ask about any market — it fetches real-time odds, volume, and status from Polymarket's public API and responds conversationally using Google Gemini.
 
-Account ownership is proven by an **EIP-191 challenge-response flow** (sign a message in your wallet, verify in Discord).
-AI is used **only** for intent parsing; all execution, validation, and security logic is deterministic TypeScript.
+## Features
 
-## What the Bot Does
+- **Natural language market search** — Ask `"tell me about US strikes Iran by...?"` and get live odds for all related markets
+- **Live market data** — Prices, volume, and status pulled directly from the Polymarket Gamma API (public, no auth)
+- **AI-powered responses** — Gemini generates conversational answers with market context
+- **Graceful degradation** — When AI quota is exhausted, falls back to structured data responses with prices and volume
+- **Multi-key rotation** — Supports up to 3 Gemini API keys with automatic failover on rate limits
+- **Wallet linking** (scaffolded) — EIP-191 signature challenge flow for connecting Polymarket accounts
+- **Trade execution** (scaffolded) — Deterministic validation pipeline with spending limits, ready for backend integration
 
-- **Market intelligence** — Ask about any live market and get real-time data, summaries, and search results.
-- **Account linking** — Link your Polymarket wallet to your Discord account via a cryptographic signature challenge (`connect account` → sign → `verify`).
-- **Trading** — Place trades on linked Polymarket accounts with deterministic validation and per-user spending limits.
-- **Safety-first routing** — Ambiguous messages are always routed to READ. WRITE requires both an explicit trade verb and a monetary reference.
+## Quick Start
 
-## Account Linking Flow
+```bash
+git clone https://github.com/Prithwiraj-CK/polybot.git
+cd polybot
+npm install
+```
 
-1. **`connect account`** — Bot issues a unique challenge nonce (5-minute TTL).
-2. **Sign the message** — In your wallet, sign the exact message the bot provides (EIP-191 `personal_sign`).
-3. **`verify <accountId> <nonce> <signature>`** — Bot verifies your signature and links your account.
-4. **`disconnect`** — Removes the link at any time.
+Create a `.env` file:
 
-Each Discord user can link **exactly one** Polymarket account. Re-linking overwrites the previous mapping.
+```env
+DISCORD_BOT_TOKEN=your_discord_bot_token
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_API_KEY_2=optional_second_key
+GEMINI_API_KEY_3=optional_third_key
+```
 
-## Commands
+Run:
 
-| Command | Description |
-|---------|-------------|
-| `connect account` | Start the account-linking challenge |
-| `verify <accountId> <nonce> <signature>` | Complete linking by proving wallet ownership |
-| `disconnect` | Remove your linked Polymarket account |
-| *(natural language)* | Ask about markets or place trades conversationally |
+```bash
+npm run dev
+```
 
-## Security Model
+The bot will log in and respond to @mentions in any server it's added to.
 
-- **No private keys in Discord/AI layers** — Wallet credentials never leave the user's wallet.
-- **Challenge-response ownership proof** — `crypto.randomUUID()` nonces, 5-minute TTL, one-time consumption (consumed only after signature verification).
-- **Deterministic validation** — All business rules, spending limits, and preconditions are enforced in pure, auditable backend code. AI has zero execution authority.
-- **Result unions over exceptions** — Every service returns typed success/error results; no unchecked exceptions cross boundaries.
-- **Branded types** — `DiscordUserId`, `PolymarketAccountId`, `MarketId`, `UsdCents` prevent accidental type mixing at compile time.
+## How It Works
 
-## Spending Limits
+```
+User @mentions bot → Message Router → READ or WRITE pipeline
 
-- Per-user daily limit: **$5.00** (500 cents).
-- Per-user hourly ceiling: **$5.00** (500 cents).
-- Limits are enforced deterministically in the validation layer before any trade reaches execution.
-- *Note: Limit tracking is currently stubbed. Production deployment requires a persistent spend-tracking service.*
+READ (default):
+  1. Extract search keywords (AI or regex)
+  2. Search Polymarket events/markets API
+  3. Fetch prices, volume, status
+  4. Generate conversational response (Gemini)
+  5. Reply in Discord
 
-## Current Status: Pre-Production
+WRITE (explicit trade commands only):
+  1. Parse intent via AI (structured JSON)
+  2. Validate deterministically (account, market, amount, limits)
+  3. Execute trade via gateway
+  4. Reply with result
+```
 
-The core architecture is implemented and compiles cleanly with zero errors. All services are wired with **in-memory stubs** suitable for local development and integration testing.
+## What Gemini Does
 
-### What works today
-- Full account-link lifecycle (challenge → verify → persist → disconnect)
-- READ/WRITE pipeline classification and routing
-- Deterministic validation of trade intents
-- Idempotent trade request assembly
-- User-account trade execution (against stub gateway)
-- Market data queries (against fixture data)
+Gemini is used for **three things**, all non-authoritative:
 
-### What needs production backends
-- Real Polymarket CLOB API integration (market data + order execution)
-- Persistent stores (challenges, account links, trade logs)
-- Real per-user spend tracking (daily + hourly limits)
-- Environment validation and graceful shutdown
-- Observability (structured logging, metrics, alerting)
+| Use | File | What happens without it |
+|-----|------|------------------------|
+| **Keyword extraction** | `PolymarketApiReadProvider.ts` | Falls back to regex prefix stripping |
+| **Conversational responses** | `aiReadExplainer.ts` | Falls back to structured data template |
+| **Intent parsing** (WRITE) | `intentParser.ts` | Trade commands won't parse |
+
+**Gemini is untrusted.** All AI output passes through deterministic validation before any action is taken.
+
+## Project Structure
+
+```
+src/
+├── index.ts                 # Discord client, @mention handler
+├── wire.ts                  # Dependency injection wiring
+├── types.ts                 # Branded types (MarketId, UsdCents, etc.)
+│
+├── read/                    # READ pipeline (fully working)
+│   ├── geminiClient.ts      # Shared Gemini client with key rotation
+│   ├── PolymarketApiReadProvider.ts  # Gamma API client + search
+│   ├── PolymarketReadService.ts      # Service layer
+│   └── aiReadExplainer.ts   # AI response generator + fallback
+│
+├── discord/                 # Discord layer
+│   ├── DiscordMessageRouter.ts    # Routes READ/WRITE, maps responses
+│   ├── classifyMessageIntent.ts   # Regex classifier (no AI)
+│   └── AccountLinkCommands.ts     # connect/verify/disconnect
+│
+├── agent/                   # AI intent parsing
+│   └── intentParser.ts      # Gemini → structured JSON
+│
+├── backend/                 # Deterministic validation
+│   ├── validateAgentOutput.ts     # Pure precondition checks
+│   ├── buildTradeRequest.ts       # Trade assembly + idempotency
+│   └── buildValidationContext.ts  # Context construction
+│
+├── auth/                    # EVM wallet linking
+│   ├── AccountLinkChallengeService.ts
+│   ├── AccountLinkVerificationService.ts
+│   ├── AccountLinkPersistenceService.ts
+│   └── EvmSignatureVerifier.ts
+│
+└── trading/                 # Trade execution
+    ├── UserAccountTrader.ts
+    └── houseTrader.ts
+```
 
 ## Tech Stack
 
 | Component | Technology |
 |-----------|------------|
-| Runtime | Node.js + TypeScript (ES2022, strict) |
+| Language | TypeScript (ES2022, strict mode) |
 | Discord | discord.js v14 |
+| AI | Google Gemini via `@google/genai` SDK |
+| Market Data | Polymarket Gamma API (public, no auth) |
 | Crypto | ethers v6 (EIP-191 signature verification) |
-| AI | OpenAI structured output (intent parsing only) |
 | Config | dotenv |
 
-## Getting Started
+## Current Status
 
-```bash
-npm install
-# Set DISCORD_BOT_TOKEN and OPENAI_API_KEY in .env
-npx ts-node src/index.ts
-```
+| Mode | Status |
+|------|--------|
+| **AI Assistant (READ)** | **Working** — live Polymarket data + Gemini responses |
+| **Trading (WRITE)** | **Scaffolded** — needs Supabase backend for persistence |
 
 ## Architecture
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full architecture diagram, layer responsibilities, data flows, and stub boundary documentation.
-
----
-
-**For questions, audits, or partnership inquiries, contact the project maintainers.**
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full file map, data flows, search strategy, and design principles.

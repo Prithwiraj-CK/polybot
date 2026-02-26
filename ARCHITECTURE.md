@@ -2,177 +2,169 @@
 
 ## High-Level Overview
 
-Polybot lets Discord users **query live Polymarket markets** (READ pipeline) and **place trades through their own linked Polymarket account** (WRITE pipeline).
-Account ownership is proven by an EIP-191 challenge-response flow before any trade can execute.
+Polybot has **two independent operating modes**:
 
-AI is used **only** for natural-language intent parsing.
+1. **AI Assistant (READ)** — Users ask natural-language questions about Polymarket and get AI-generated answers backed by live market data. **This mode works today with zero backend.** It requires only `OPENAI_API_KEY`.
+2. **Wallet-Linked Trading (WRITE)** — Users link their Polymarket wallet via an EIP-191 challenge-response flow and place trades through their own account. This mode requires a persistent backend (planned: **Supabase**).
+
+AI is used for intent parsing (WRITE) and conversational responses (READ).
 All execution, validation, and security logic is handled by deterministic, auditable TypeScript code.
 
-## Architecture Diagram
+## Architecture
 
-```mermaid
-flowchart TD
-  subgraph Discord["Discord Layer"]
-    A["Discord Bot  (index.ts)"]
-    ACMD["AccountLinkCommands"]
-    ROUTER["DiscordMessageRouter"]
-    CLASSIFY["classifyMessageIntent"]
-  end
+## Overview
 
-  subgraph Auth["Auth Layer"]
-    CHALLENGE["AccountLinkChallengeService"]
-    VERIFY["AccountLinkVerificationService"]
-    PERSIST["AccountLinkPersistenceService"]
-    EVMSIG["EvmSignatureVerifier"]
-  end
+PolyBot is a Discord bot that lets users query live Polymarket prediction markets via natural language. It has two pipelines:
 
-  subgraph AI["AI Agent Layer"]
-    INTENT["intentParser (OpenAI)"]
-  end
-
-  subgraph Backend["Backend Layer"]
-    VALIDATE["validateAgentOutput"]
-    BUILD_CTX["buildValidationContext"]
-    BUILD_TR["buildTradeRequest"]
-  end
-
-  subgraph Read["Read Layer"]
-    READSVC["PolymarketReadService"]
-  end
-
-  subgraph Trade["Trading Layer"]
-    TRADER["UserAccountTrader"]
-  end
-
-  subgraph External["External"]
-    POLY["Polymarket API"]
-  end
-
-  A --> ACMD
-  A --> ROUTER
-  ROUTER --> CLASSIFY
-  CLASSIFY -->|READ| READSVC
-  CLASSIFY -->|WRITE| INTENT
-  INTENT -->|AgentOutput| VALIDATE
-  VALIDATE --> BUILD_TR
-  BUILD_CTX --> VALIDATE
-  PERSIST --> BUILD_CTX
-  READSVC --> BUILD_CTX
-  BUILD_TR -->|TradeRequest| TRADER
-  TRADER --> POLY
-  READSVC --> POLY
-
-  ACMD --> CHALLENGE
-  ACMD --> VERIFY
-  ACMD --> PERSIST
-  VERIFY --> CHALLENGE
-  VERIFY --> EVMSIG
-```
-
-## Source Layout
+- **READ** — AI-powered Q&A about markets (live, fully working)
+- **WRITE** — Wallet-linked trading (scaffolded, needs Supabase backend)
 
 ```
-src/
-├── index.ts                          # Discord client & top-level routing
-├── types.ts                          # Branded types, contracts, Trader interface
-├── wire.ts                           # DI wiring (in-memory stubs today)
-│
-├── agent/
-│   └── intentParser.ts               # OpenAI structured-output intent parser
-│
-├── auth/
-│   ├── AccountLinkChallengeService.ts # Challenge lifecycle (issue / validate / consume)
-│   ├── AccountLinkVerificationService.ts # Signature verification orchestration
-│   ├── AccountLinkPersistenceService.ts  # Discord↔Polymarket link persistence
-│   ├── EvmSignatureVerifier.ts        # EIP-191 personal_sign via ethers
-│   └── polymarketAuth.ts             # (Reserved for future OAuth flows)
-│
-├── backend/
-│   ├── validateAgentOutput.ts         # Pure deterministic precondition validator
-│   ├── buildValidationContext.ts      # Constructs ValidationContext from services
-│   └── buildTradeRequest.ts           # Pure structural assembler → TradeRequest
-│
-├── discord/
-│   ├── classifyMessageIntent.ts       # READ / WRITE classifier (regex, no AI)
-│   ├── DiscordMessageRouter.ts        # Orchestration + user-facing message boundary
-│   └── AccountLinkCommands.ts         # connect / verify / disconnect command handlers
-│
-├── read/
-│   └── PolymarketReadService.ts       # Read-only market data layer
-│
-├── trading/
-│   ├── UserAccountTrader.ts           # Execution-only Trader for linked accounts
-│   └── houseTrader.ts                 # (Legacy demo house-wallet Trader)
-│
-└── storage/
-    └── limits.ts                      # (Placeholder for persistent limit tracking)
+Discord Message
+      │
+      ▼
+  index.ts          ← Discord client, @mention listener
+      │
+      ▼
+  DiscordMessageRouter.ts   ← Routes to READ or WRITE pipeline
+      │
+      ├── READ ──────────────────────────────────────────────┐
+      │   classifyMessageIntent.ts  (regex, no AI)           │
+      │        │                                             │
+      │        ▼                                             │
+      │   PolymarketReadService.ts  (service layer)          │
+      │        │                                             │
+      │        ▼                                             │
+      │   PolymarketApiReadProvider.ts  (Gamma API client)   │
+      │        │                                             │
+      │        ▼                                             │
+      │   aiReadExplainer.ts  (Gemini → Discord response)    │
+      │                                                      │
+      └──────────────────────────────────────────────────────┘
+      │
+      ├── WRITE ─────────────────────────────────────────────┐
+      │   intentParser.ts        (Gemini → structured JSON)  │
+      │   validateAgentOutput.ts (deterministic rules)       │
+      │   buildTradeRequest.ts   (assembles TradeRequest)    │
+      │   UserAccountTrader.ts   (execution gateway)         │
+      └──────────────────────────────────────────────────────┘
 ```
 
-## Layer Responsibilities
+---
 
-| Layer | Responsibility | What it must **not** do |
-|-------|---------------|------------------------|
-| **Discord** | Message routing, user-facing presentation, command parsing | Execute trades, perform crypto, own business rules |
-| **AI Agent** | Parse natural language → structured `AgentOutput` JSON | Execute anything, decide limits, access wallets |
-| **Backend** | Deterministic validation, limit checks, request assembly | Format user-facing text, call Polymarket directly |
-| **Auth** | Challenge lifecycle, EIP-191 signature verification, link persistence | Discord transport, trade execution |
-| **Read** | Market data queries (list, search, summarize) | Mutate state, execute trades |
-| **Trading** | Execute validated `TradeRequest` via Polymarket gateway | Parse intents, validate limits, format messages |
+## File Map
 
-## Key Design Principles
+### Entry & Wiring
 
-1. **Result unions over exceptions** — Every service returns `{ ok: true; ... } | { ok: false; errorCode: ... }`. User-facing formatting happens only in the Discord layer.
-2. **Branded primitives** — `DiscordUserId`, `PolymarketAccountId`, `MarketId`, `UsdCents` prevent accidental mixing of string/number types.
-3. **Injected context** — Validators and assemblers receive all inputs as data. No I/O inside pure functions.
-4. **Conservative classification** — The READ/WRITE classifier defaults to READ on ambiguity. WRITE requires both an explicit trade verb and a monetary reference.
-5. **Challenge-response linking** — Account ownership is proven via EIP-191 `personal_sign` with a `crypto.randomUUID()` nonce, 5-minute TTL, and one-time consumption enforced after signature verification passes.
+| File | Purpose |
+|------|---------|
+| `src/index.ts` | Discord client setup, @mention handler, routes to router |
+| `src/wire.ts` | Dependency injection — wires all services together |
+| `src/types.ts` | All TypeScript types/interfaces (branded IDs, Market, TradeRequest, etc.) |
 
-## Data Flows
+### `src/discord/` — Discord Layer
 
-### Account Linking (connect → verify → disconnect)
+| File | Purpose |
+|------|---------|
+| `DiscordMessageRouter.ts` | Routes messages to READ or WRITE pipeline, maps results to user-facing strings |
+| `classifyMessageIntent.ts` | Deterministic regex classifier — READ unless explicit trade verb + money amount |
+| `AccountLinkCommands.ts` | Handles `connect account`, `verify`, `disconnect` commands |
+| `bot.ts` | Placeholder (entrypoint logic lives in `index.ts`) |
 
-1. User sends `connect account` in Discord.
-2. `AccountLinkChallengeService` issues a challenge with a cryptographic nonce (5-min TTL).
-3. Bot replies with the nonce and the exact message to sign.
-4. User signs the message in their wallet and sends `verify <accountId> <nonce> <signature>`.
-5. `AccountLinkVerificationService` validates the challenge (without consuming), verifies the EIP-191 signature, then consumes the challenge.
-6. `AccountLinkPersistenceService` stores the Discord↔Polymarket link (overwrite semantics: one account per user).
-7. User sends `disconnect` → link is removed.
+### `src/read/` — READ Pipeline (Market Data + AI Responses)
 
-### Placing a Trade (WRITE pipeline)
+| File | Purpose |
+|------|---------|
+| `PolymarketReadService.ts` | Service layer — filters, searches, summarizes markets via provider |
+| `PolymarketApiReadProvider.ts` | Gamma API client — fetches markets, events, paginated search with slug matching |
+| `aiReadExplainer.ts` | Gemini-powered conversational response generator with fallback |
+| `geminiClient.ts` | Shared Gemini client with multi-key rotation and rate-limit handling |
 
-1. User sends a natural-language message in Discord.
-2. `classifyMessageIntent` routes to WRITE (trade verb + money reference detected).
-3. `intentParser` (OpenAI) extracts structured `AgentOutput` with intent `place_bet`.
-4. `buildValidationContext` resolves linked account + live markets + spend limits into a `ValidationContext`.
-5. `validateAgentOutput` runs deterministic precondition checks (account linked, market active, amount valid, limits OK).
-6. `buildTradeRequest` assembles a `TradeRequest` with a deterministic idempotency key (5-min time buckets).
-7. `UserAccountTrader` executes the trade through the Polymarket gateway.
-8. Result (success or error code) is mapped to a user-facing string in `DiscordMessageRouter`.
+### `src/agent/` — AI Intent Parsing (WRITE Pipeline)
 
-### Querying Markets (READ pipeline)
+| File | Purpose |
+|------|---------|
+| `intentParser.ts` | Gemini → structured JSON intent (place_bet, get_balance, etc.) with deterministic validation |
 
-1. User sends a question or informational message.
-2. `classifyMessageIntent` routes to READ (default for ambiguous messages).
-3. `PolymarketReadService` fetches live markets, searches by text, and summarizes.
-4. Read explainer formats a human-readable response.
+### `src/backend/` — Trade Validation & Assembly
 
-## Failure Handling & Safety
+| File | Purpose |
+|------|---------|
+| `validateAgentOutput.ts` | Pure deterministic validator — checks account link, market status, amounts, limits |
+| `buildTradeRequest.ts` | Assembles validated TradeRequest with idempotency key |
+| `buildValidationContext.ts` | Builds ValidationContext from persistence services |
 
-- **Idempotency** — Trade requests carry a deterministic idempotency key derived from (identity + market + outcome + amount + time bucket).
-- **Result unions** — No exceptions cross service boundaries; every failure is a typed error code.
-- **Challenge replay prevention** — Challenges are one-time-use (consumed only after signature verification), TTL-bounded, and use `crypto.randomUUID()` nonces.
-- **Conservative defaults** — Unknown intents route to READ. Validation rejects before execution.
-- **No secrets in Discord/AI layers** — Private keys and wallet credentials never enter the Discord or AI layers.
+### `src/auth/` — Account Linking (EVM Signature Verification)
 
-## Current Stub Boundaries (pre-production)
+| File | Purpose |
+|------|---------|
+| `AccountLinkChallengeService.ts` | Issues/validates time-limited nonce challenges |
+| `AccountLinkVerificationService.ts` | Verifies EVM signatures against challenges |
+| `AccountLinkPersistenceService.ts` | Persists Discord ↔ Polymarket account mappings |
+| `EvmSignatureVerifier.ts` | EIP-191 personal_sign verification via ethers.js |
+| `polymarketAuth.ts` | Type definitions for redirect-based auth flow (future) |
 
-The following components are wired with **in-memory stubs** in `wire.ts`:
+### `src/trading/` — Trade Execution
 
-| Stub | Production replacement needed |
-|------|-------------------------------|
-| `InMemoryAccountLinkChallengeStore` | Persistent store (Redis / database) with TTL enforcement |
-| `InMemoryAccountLinkStore` | Database-backed persistence |
-| `InMemoryPolymarketReadProvider` | Live Polymarket CLOB API integration |
-| `StubPolymarketExecutionGateway` | Live Polymarket order execution API |
-| `DAILY_LIMIT_CENTS_STUB` / `SPENT_THIS_HOUR_CENTS_STUB` | Real per-user spend tracking service |
+| File | Purpose |
+|------|---------|
+| `UserAccountTrader.ts` | Executes validated trades via PolymarketExecutionGateway |
+| `houseTrader.ts` | Alternative trader for house-wallet mode (scaffolded) |
+
+### `src/storage/` — Persistence (Placeholder)
+
+| File | Purpose |
+|------|---------|
+| `limits.ts` | Placeholder for per-user spend tracking (needs Supabase) |
+
+---
+
+## What Gemini Does
+
+Gemini (Google's LLM) is used in **three places**, all read-only and non-authoritative:
+
+1. **Keyword Extraction** (`PolymarketApiReadProvider.ts`)
+   - Extracts search keywords from conversational queries
+   - Example: `"tell me about US strikes Iran by...?"` → `"US strikes Iran by"`
+   - Falls back to simple prefix stripping if Gemini is unavailable
+
+2. **Conversational Response** (`aiReadExplainer.ts`)
+   - Generates natural-language Discord responses from market data
+   - Receives factual market context (prices, volume, status) as system prompt
+   - Falls back to a structured template if Gemini is unavailable
+
+3. **Intent Parsing** (`intentParser.ts`)
+   - Parses trade commands into structured JSON for the WRITE pipeline
+   - Output is **never trusted** — always validated by deterministic code
+   - Used only for WRITE-classified messages (explicit trade verb + money amount)
+
+**Key principle:** Gemini is untrusted. All AI output passes through deterministic validation before any action is taken. The bot works without Gemini — it just uses template responses and regex-based search instead.
+
+---
+
+## Key Rotation
+
+The bot supports multiple Gemini API keys (`GEMINI_API_KEY`, `GEMINI_API_KEY_2`, `GEMINI_API_KEY_3`). When a key hits its rate limit (429), it's automatically disabled for 60 seconds and the next key is tried. This triples the effective free-tier quota.
+
+---
+
+## Search Strategy
+
+When a user asks about a market, the search pipeline:
+
+1. **Prefix strip / AI keyword extraction** — cleans conversational noise
+2. **Event slug search** — tries the Gamma `/events?slug=...` endpoint with sliding-window slug candidates
+3. **If events found** → return them (sorted: active first, then closed)
+4. **If no events** → fallback to `/markets?slug=...&tag=...&text_query=...`
+5. **Dedup + merge** results across all search methods
+
+---
+
+## Tech Stack
+
+- **TypeScript** (ES2022, strict mode, CommonJS)
+- **discord.js** v14 — Discord client
+- **@google/genai** — Gemini SDK for AI features
+- **ethers** v6 — EVM signature verification
+- **dotenv** — env config
+- **Polymarket Gamma API** — public, no auth, market data

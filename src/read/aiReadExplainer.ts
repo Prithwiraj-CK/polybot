@@ -11,7 +11,11 @@ const READ_SYSTEM_PROMPT = [
 	'Be concise, accurate, and conversational. Keep responses under 300 words.',
 	'You have NO ability to execute trades, access wallets, or modify anything.',
 	'If the user asks you to place a trade or do something you cannot do, politely explain they need to use a trade command instead.',
-	'Never fabricate market data. If you do not have data for a specific market, say so.',
+	'Never fabricate market data.',
+	'IMPORTANT: For sports/esports queries (teams, players, matches), the search returns the top active markets from that league or sport.',
+	'Even if the exact match or teams are not in the sample markets, DO NOT say you cannot find the market.',
+	'Instead, tell the user that while you do not have the specific match details, here are the top trending markets from that league/sport right now.',
+	'You MUST present the sample markets provided in the context. Never hide them.',
 	'Format responses for Discord (markdown is OK, no HTML).',
 ].join(' ');
 
@@ -26,12 +30,20 @@ export function createAiReadExplainer(): (input: ReadExplainerInput) => Promise<
 		}
 
 		const contextBlock = buildMarketContext(input);
+		const fullPrompt = READ_SYSTEM_PROMPT + '\n\nCurrent market context:\n' + contextBlock;
+
+		console.log('\n[gemini] --- SYSTEM PROMPT ---');
+		console.log(fullPrompt);
+		console.log('[gemini] ----------------------\n');
+
 		const text = await callGemini({
 			contents: input.message,
-			systemInstruction: READ_SYSTEM_PROMPT + '\n\nCurrent market context:\n' + contextBlock,
+			systemInstruction: fullPrompt,
 			temperature: 0.4,
 			maxOutputTokens: 500,
 		});
+
+		console.log(`[gemini] Response: "${text}"`);
 
 		if (!text) {
 			return fallbackExplainer(input);

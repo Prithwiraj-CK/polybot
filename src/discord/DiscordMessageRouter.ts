@@ -156,14 +156,43 @@ async function defaultReadExplainer(input: ReadExplainerInput): Promise<string> 
 
 /**
  * Produces up to three factual summaries for READ responses.
+ * For sports/esports events, prioritizes outright winner markets over prop/handicap markets.
  */
 async function summarizeUpToThree(
 	readService: PolymarketReadService,
 	markets: readonly { id: MarketSummary['id'] }[],
 ): Promise<readonly MarketSummary[]> {
-	const selected = markets.slice(0, 3);
-	const summaries = await Promise.all(selected.map((market) => readService.summarizeMarket(market.id)));
-	return summaries.filter((summary): summary is MarketSummary => summary !== null);
+	// First, get all market summaries to enable smart sorting
+	const allSummaries = await Promise.all(
+		markets.slice(0, 15).map((market) => readService.summarizeMarket(market.id)),
+	);
+	const validSummaries = allSummaries.filter((summary): summary is MarketSummary => summary !== null);
+
+	// Prioritize outright winner/series markets over prop markets
+	// (e.g., "KTC vs DRXC" over "Game 4 Winner" or "Handicap -2.5")
+	const sorted = validSummaries.sort((a, b) => {
+		const aIsProp = isPropMarket(a.question);
+		const bIsProp = isPropMarket(b.question);
+		if (aIsProp !== bIsProp) return aIsProp ? 1 : -1; // outright first
+		return 0; // preserve original order
+	});
+
+	return sorted.slice(0, 3);
+}
+
+/**
+ * Returns true if a market question appears to be a prop/sub-market
+ * rather than an outright winner market.
+ */
+function isPropMarket(question: string): boolean {
+	const lower = question.toLowerCase();
+	const propIndicators = [
+		'game 1', 'game 2', 'game 3', 'game 4', 'game 5',
+		'handicap', 'spread', 'total', 'o/u', 'over/under',
+		'first blood', 'first to', 'kill handicap',
+		'map 1', 'map 2', 'map 3',
+	];
+	return propIndicators.some(indicator => lower.includes(indicator));
 }
 
 /**

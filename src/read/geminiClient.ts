@@ -33,14 +33,15 @@ function ensureInitialized(): void {
 	if (initialized) return;
 	initialized = true;
 
+	// Load primary key + any numbered keys (GEMINI_API_KEY_2, _3, _4, ...)
 	const primary = process.env.GEMINI_API_KEY;
 	if (primary) keyStates.push({ key: primary, disabledUntil: 0 });
 
-	const key2 = process.env.GEMINI_API_KEY_2;
-	if (key2) keyStates.push({ key: key2, disabledUntil: 0 });
-
-	const key3 = process.env.GEMINI_API_KEY_3;
-	if (key3) keyStates.push({ key: key3, disabledUntil: 0 });
+	for (let i = 2; i <= 20; i++) {
+		const k = process.env[`GEMINI_API_KEY_${i}`];
+		if (!k) break;
+		keyStates.push({ key: k, disabledUntil: 0 });
+	}
 
 	console.log(`[gemini] Initialized with ${keyStates.length} API key(s)`);
 }

@@ -108,12 +108,14 @@ interface GammaMarketResponse {
 	readonly condition_id?: string;
 	readonly question?: string;
 	readonly title?: string; // events payload may use title
+	readonly slug?: string; // URL-friendly slug for constructing Polymarket/Olympus links
 	readonly active?: boolean;
 	readonly closed?: boolean;
 	readonly outcomes?: string | string[]; // Gamma markets use JSON string; events may send string[]
 	readonly outcomePrices?: string | string[]; // JSON string or array of price strings
 	readonly volume?: string | number;
 	readonly accepting_orders?: boolean;
+	readonly events?: ReadonlyArray<{ readonly slug?: string }>; // parent event(s) — slug used for Polymarket event URLs
 }
 
 /**
@@ -899,6 +901,12 @@ function mapGammaMarketToMarket(raw: GammaMarketResponse): Market | null {
 	const outcomePrices = parseOutcomePrices(raw.outcomePrices, outcomes.length);
 	const volume = typeof raw.volume === 'number' ? raw.volume : parseFloat(String(raw.volume ?? '0')) || 0;
 
+	// Derive slug: prefer Gamma API slug, fallback to slugifying the question
+	const slug = raw.slug || question.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+	// Extract parent event slug for Polymarket event URL (used by Olympus links)
+	const eventSlug = raw.events?.[0]?.slug ?? undefined;
+
 	return {
 		id: id as MarketId,
 		question,
@@ -906,6 +914,8 @@ function mapGammaMarketToMarket(raw: GammaMarketResponse): Market | null {
 		outcomes,
 		outcomePrices,
 		volume,
+		slug,
+		eventSlug,
 	};
 }
 

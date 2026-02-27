@@ -17,6 +17,7 @@ const READ_SYSTEM_PROMPT = [
 	'Instead, tell the user that while you do not have the specific match details, here are the top trending markets from that league/sport right now.',
 	'You MUST present the sample markets provided in the context. Never hide them.',
 	'Format responses for Discord (markdown is OK, no HTML).',
+	'Do NOT include any Olympus or Polymarket links in your response — they are appended automatically after your answer.',
 ].join(' ');
 
 /**
@@ -43,7 +44,9 @@ export function createAiReadExplainer(): (input: ReadExplainerInput) => Promise<
 			return fallbackExplainer(input);
 		}
 
-		return text;
+		// Append Olympus links deterministically — don't rely on AI to include them
+		const olympusLinks = buildOlympusLinks(input);
+		return olympusLinks ? `${text}\n\n${olympusLinks}` : text;
 	};
 }
 
@@ -63,7 +66,8 @@ function buildMarketContext(input: ReadExplainerInput): string {
 		for (const summary of input.sampleMarketSummaries) {
 			const priceInfo = summary.outcomes.map((o, i) => `${o}: ${Math.round((summary.outcomePrices[i] ?? 0) * 100)}%`).join(', ');
 			const vol = summary.volume >= 1_000_000 ? `$${(summary.volume / 1_000_000).toFixed(1)}M` : summary.volume >= 1_000 ? `$${(summary.volume / 1_000).toFixed(0)}K` : `$${Math.round(summary.volume)}`;
-			lines.push(`- [${summary.status}] "${summary.question}" (${priceInfo}) vol=${vol}`);
+			const olympusLink = '';
+			lines.push(`- [${summary.status}] "${summary.question}" (${priceInfo}) vol=${vol}${olympusLink}`);
 		}
 	}
 
@@ -95,5 +99,26 @@ function fallbackExplainer(input: ReadExplainerInput): string {
 		}
 	}
 
+	// Append Olympus links deterministically
+	const olympusLinks = buildOlympusLinks(input);
+	if (olympusLinks) {
+		parts.push(`\n\n${olympusLinks}`);
+	}
+
 	return parts.join('');
+}
+
+/**
+ * Builds Olympus links block appended after AI or fallback responses.
+ * Guarantees links are always present regardless of AI token limits.
+ */
+function buildOlympusLinks(input: ReadExplainerInput): string {
+	const links: string[] = [];
+	for (const summary of input.sampleMarketSummaries) {
+		if (summary.slug) {
+			// Use angle brackets to suppress Discord embeds
+			links.push(`<https://olympusx.app/app/market/${summary.slug}>`);
+		}
+	}
+	return links.length > 0 ? `View on Olympus:\n${links.join('\n')}` : '';
 }

@@ -1,5 +1,13 @@
 import 'dotenv/config';
-import { Client, GatewayIntentBits } from 'discord.js';
+import {
+  Client,
+  GatewayIntentBits,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+  ComponentType,
+} from 'discord.js';
 import { REST, Routes } from 'discord.js';
 
 import {
@@ -129,8 +137,76 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    const response = await router.routeMessage(text, discordUserId);
-    await message.reply(response);
+    const result = await router.routeMessage(text, discordUserId);
+
+    // Plain text response
+    if (result.type === 'text') {
+      await message.reply(result.content);
+      return;
+    }
+
+    // Trade confirmation — send embed with Confirm / Cancel buttons
+    const actionEmoji = result.action === 'BUY' ? '🟢' : '🔴';
+    const outcomeLabel = result.outcome === 'YES' ? 'UP / YES' : 'DOWN / NO';
+    const embed = new EmbedBuilder()
+      .setColor(result.action === 'BUY' ? 0x00c853 : 0xd50000)
+      .setTitle(`${actionEmoji} Confirm ${result.action} Order`)
+      .addFields(
+        { name: '📊 Market', value: result.marketQuestion, inline: false },
+        { name: '🎯 Side', value: outcomeLabel, inline: true },
+        { name: '💵 Amount', value: `$${result.amountDollars}`, inline: true },
+      )
+      .setFooter({ text: 'Expires in 60 seconds — only you can confirm this trade.' });
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`confirm:${result.confirmId}`)
+        .setLabel('Confirm')
+        .setStyle(ButtonStyle.Success)
+        .setEmoji('✅'),
+      new ButtonBuilder()
+        .setCustomId(`cancel:${result.confirmId}`)
+        .setLabel('Cancel')
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji('❌'),
+    );
+
+    const confirmMsg = await message.reply({ embeds: [embed], components: [row] });
+
+    try {
+      const interaction = await confirmMsg.awaitMessageComponent({
+        componentType: ComponentType.Button,
+        filter: (i) => i.user.id === message.author.id,
+        time: 60_000,
+      });
+
+      await interaction.deferUpdate();
+
+      if (interaction.customId.startsWith('confirm:')) {
+        const tradeResult = await router.executePendingTrade(result.confirmId);
+        const resultText = tradeResult ?? '❌ Trade expired or was already cancelled.';
+        await confirmMsg.edit({
+          content: resultText,
+          embeds: [],
+          components: [],
+        });
+      } else {
+        router.cancelPendingTrade(result.confirmId);
+        await confirmMsg.edit({
+          content: '❌ **Trade cancelled.**',
+          embeds: [],
+          components: [],
+        });
+      }
+    } catch {
+      // Timed out — 60s expired with no click
+      router.cancelPendingTrade(result.confirmId);
+      await confirmMsg.edit({
+        content: '⏰ **Trade confirmation timed out.** Place the order again if you\'d like to proceed.',
+        embeds: [],
+        components: [],
+      }).catch(() => {});
+    }
   } catch {
     await message.reply('Unable to process your request right now. Please try again.');
   }

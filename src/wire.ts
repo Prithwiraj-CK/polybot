@@ -20,7 +20,7 @@ import {
 } from './trading/UserAccountTrader';
 import { SupabaseAccountLinkStore } from './storage/SupabaseAccountLinkStore';
 import type { Balance, DiscordUserId, Market, PolymarketAccountId, TradeResult } from './types';
-import { ClobClient, Chain, Side, OrderType } from '@polymarket/clob-client';
+import { ClobClient, Chain, Side, OrderType, AssetType } from '@polymarket/clob-client';
 import { SignatureType } from '@polymarket/order-utils';
 import { ethers } from 'ethers';
 
@@ -164,6 +164,54 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
     const maskedEoa = `${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}`;
     const maskedProxy = `${proxyWallet.slice(0, 6)}…${proxyWallet.slice(-4)}`;
     console.log(`🔗 ClobPolymarketExecutionGateway initialized (EOA: ${maskedEoa}, Proxy: ${maskedProxy})`);
+
+    // Ensure USDC allowance is set for exchange contracts (one-time on-chain approval)
+    this.ensureAllowance().catch((err) => {
+      console.error('⚠️ Failed to set USDC allowance — trades may fail:', err);
+    });
+  }
+
+  /**
+   * Check and set USDC balance allowance for the Polymarket exchange contracts.
+   * This is an idempotent operation — if allowance is already max, it's a no-op on-chain.
+   */
+  private async ensureAllowance(): Promise<void> {
+    try {
+      const collateralParams = { asset_type: AssetType.COLLATERAL };
+      const current = await this.clobClient.getBalanceAllowance(collateralParams) as unknown as Record<string, unknown>;
+
+      // CLOB client may return an HTTP error object instead of { balance, allowance }
+      if (typeof current.status === 'number' && current.status >= 400) {
+        console.warn('⚠️ getBalanceAllowance returned error, updating allowance anyway...');
+        await this.clobClient.updateBalanceAllowance(collateralParams);
+        console.log('✅ USDC allowance updated');
+        return;
+      }
+
+      const balance = current.balance as string | undefined;
+      const allowance = current.allowance as string | undefined;
+      console.log(`💰 Current allowance: ${allowance}, balance: ${balance}`);
+
+      // If allowance is very low (or zero), update it
+      const allowanceBigInt = BigInt(allowance || '0');
+      const threshold = BigInt('1000000000'); // 1000 USDC in 6 decimals
+      if (allowanceBigInt < threshold) {
+        console.log('🔓 Setting max USDC allowance for Polymarket exchange...');
+        await this.clobClient.updateBalanceAllowance(collateralParams);
+        console.log('✅ USDC allowance updated successfully');
+      } else {
+        console.log('✅ USDC allowance already sufficient');
+      }
+    } catch (err) {
+      console.error('⚠️ Allowance check/update error:', err);
+      // Try to set allowance anyway
+      try {
+        await this.clobClient.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+        console.log('✅ USDC allowance updated (fallback)');
+      } catch (updateErr) {
+        console.error('❌ Could not update allowance:', updateErr);
+      }
+    }
   }
 
   public async executeTradeForAccount(
@@ -172,10 +220,14 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
   ): Promise<ExecuteTradeResponse> {
     const conditionId = String(params.marketId);
 
-    // 1. Resolve the token ID for the requested outcome
+    // 1. Resolve token ID for this market
     const tokenId = await this.resolveTokenId(conditionId, params.outcome);
 
-    // 2. Amount in dollars (CLOB expects dollars for BUY, shares for SELL)
+    // 2. Fetch the correct tick size from the CLOB (varies per market: 0.1 / 0.01 / 0.001 / 0.0001)
+    const tickSize = await this.clobClient.getTickSize(tokenId);
+    console.log(`⏱️  Tick size for token ${tokenId.substring(0, 12)}...: ${tickSize}`);
+
+    // 3. Amount in dollars (CLOB expects dollars for BUY, shares for SELL)
     const amountDollars = params.amountCents / 100;
     if (amountDollars < 5) {
       throw { code: 'INVALID_AMOUNT', message: 'Polymarket minimum order size is $5' };
@@ -183,47 +235,22 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
 
     const side = params.action === 'SELL' ? Side.SELL : Side.BUY;
 
-    // 3. Place the market order via CLOB
+    // 4. Place the market order via CLOB
     console.log(
-      `📤 Placing market order: ${side} ${params.outcome} $${amountDollars} on ${conditionId} (token ${tokenId.substring(0, 12)}...)`,
+      `📤 Placing market order: ${side} ${params.outcome} $${amountDollars} on ${conditionId} (token ${tokenId.substring(0, 12)}... tickSize=${tickSize})`,
     );
 
+    let result: unknown;
     try {
-      const result = await this.clobClient.createAndPostMarketOrder(
+      result = await this.clobClient.createAndPostMarketOrder(
         {
           tokenID: tokenId,
           amount: amountDollars,
           side,
         },
-        { tickSize: '0.01' },
+        { tickSize },
         OrderType.FOK,
       );
-
-      const resultObj = result as Record<string, unknown>;
-      const logSafe = { status: resultObj.status, success: resultObj.success, orderID: resultObj.orderID };
-      console.log('📥 Order result:', JSON.stringify(logSafe));
-      const success = resultObj.success as boolean | undefined;
-      const status = resultObj.status as string | undefined;
-      const errorMsg = resultObj.errorMsg as string | undefined;
-
-      // Check if order actually filled
-      if (success === false || (status && status !== 'matched' && status !== 'delayed')) {
-        const reason = errorMsg || status || 'Order was not filled';
-        console.error('❌ Order not filled:', reason);
-        throw { code: 'UPSTREAM_UNAVAILABLE', message: reason };
-      }
-
-      // Extract transaction hash or order ID
-      const txHashes = resultObj.transactionsHashes as string[] | undefined;
-      const tradeId =
-        txHashes?.[0] ??
-        (resultObj.orderID as string | undefined) ??
-        params.idempotencyKey;
-
-      return {
-        tradeId: String(tradeId),
-        executedAtMs: Date.now(),
-      };
     } catch (error: unknown) {
       const errMsg =
         error instanceof Error
@@ -244,10 +271,58 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
       }
       throw { code: 'UPSTREAM_UNAVAILABLE', message: errMsg };
     }
+
+    const resultObj = result as Record<string, unknown>;
+    const logSafe = { status: resultObj.status, success: resultObj.success, orderID: resultObj.orderID, data: resultObj.data };
+    console.log('📥 Order result:', JSON.stringify(logSafe));
+
+    // CLOB client may return HTTP error responses (e.g. 400) without throwing
+    const httpStatus = typeof resultObj.status === 'number' ? resultObj.status : null;
+    const dataError = (resultObj.data as Record<string, unknown> | undefined)?.error as string | undefined;
+
+    if (httpStatus && httpStatus >= 400) {
+      const errText = dataError ?? String(resultObj.statusText ?? `HTTP ${httpStatus}`);
+      console.error(`❌ CLOB returned HTTP ${httpStatus}:`, errText);
+
+      if (errText.includes('balance') || errText.includes('allowance') || errText.includes('insufficient')) {
+        throw { code: 'INVALID_AMOUNT', message: 'Insufficient USDC balance on Polymarket. Deposit funds first.' };
+      }
+      if (errText.includes('not found') || httpStatus === 404) {
+        throw { code: 'INVALID_MARKET', message: 'Market not found on CLOB' };
+      }
+      throw { code: 'UPSTREAM_UNAVAILABLE', message: errText };
+    }
+
+    const success = resultObj.success as boolean | undefined;
+    const status = typeof resultObj.status === 'string' ? resultObj.status : undefined;
+    const errorMsg = resultObj.errorMsg as string | undefined;
+
+    // Check if order actually filled
+    if (success === false || (status && status !== 'matched' && status !== 'delayed')) {
+      const reason = String(errorMsg || status || 'Order was not filled');
+      console.error('❌ Order not filled:', reason);
+      // Provide a more helpful message for FOK unmatched orders
+      if (!reason || reason.toLowerCase().includes('unmatched') || reason.toLowerCase().includes('unfilled')) {
+        throw { code: 'UPSTREAM_UNAVAILABLE', message: 'Order not filled — no match available right now. Try again in a moment.' };
+      }
+      throw { code: 'UPSTREAM_UNAVAILABLE', message: reason };
+    }
+
+    // Extract transaction hash or order ID
+    const txHashes = resultObj.transactionsHashes as string[] | undefined;
+    const tradeId =
+      txHashes?.[0] ??
+      (resultObj.orderID as string | undefined) ??
+      params.idempotencyKey;
+
+    return {
+      tradeId: String(tradeId),
+      executedAtMs: Date.now(),
+    };
   }
 
   /**
-   * Resolves the CLOB token ID for a given conditionId + outcome.
+   * Resolves the CLOB token ID and tick size for a given conditionId + outcome.
    * Tries CLOB getMarket first, falls back to Gamma clobTokenIds.
    */
   private async resolveTokenId(conditionId: string, outcome: 'YES' | 'NO'): Promise<string> {
@@ -258,7 +333,8 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
 
     try {
       const clobMarket = await this.clobClient.getMarket(conditionId);
-      const tokens = (clobMarket as Record<string, unknown>).tokens as
+      const raw = clobMarket as Record<string, unknown>;
+      const tokens = raw.tokens as
         | Array<{ token_id: string; outcome: string }>
         | undefined;
 
@@ -266,9 +342,9 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
         const match = tokens.find((t) =>
           desiredOutcomes.includes(t.outcome.toLowerCase()),
         );
-        if (match) return match.token_id;
-        // If no match by name, use positional: first = YES/Up, second = NO/Down
-        return outcome === 'YES' ? tokens[0].token_id : tokens[1].token_id;
+        return match
+          ? match.token_id
+          : outcome === 'YES' ? tokens[0].token_id : tokens[1].token_id;
       }
     } catch {
       console.warn('CLOB getMarket failed for', conditionId, '- trying Gamma fallback');

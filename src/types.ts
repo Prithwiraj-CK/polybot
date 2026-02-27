@@ -54,6 +54,10 @@ export interface Market {
   readonly outcomePrices: readonly number[];
   /** Total trading volume in USD. */
   readonly volume: number;
+  /** URL-friendly slug from the Gamma API (used for Olympus/Polymarket links). */
+  readonly slug?: string;
+  /** Parent event slug from the Gamma API — used for Polymarket event URLs. */
+  readonly eventSlug?: string;
 }
 
 /** AI-parsed trade intent before deterministic validation. */

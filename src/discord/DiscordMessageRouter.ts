@@ -13,8 +13,25 @@ import {
 	canSpend,
 	getSpentToday,
 	getRemainingToday,
+	isOwnerExempt,
 	recordSpend,
 } from '../storage/limits';
+import crypto from 'crypto';
+
+/**
+ * Result of routing a Discord message.
+ * Either a plain text response or a trade confirmation request.
+ */
+export type RouteResult =
+	| { readonly type: 'text'; readonly content: string }
+	| {
+			readonly type: 'confirm';
+			readonly confirmId: string;
+			readonly marketQuestion: string;
+			readonly outcome: 'YES' | 'NO';
+			readonly action: TradeAction;
+			readonly amountDollars: string;
+	  };
 
 /**
  * Data passed to the READ explainer.
@@ -51,16 +68,51 @@ export interface DiscordMessageRouterDependencies {
  */
 export class DiscordMessageRouter {
 	private readonly readExplainer: (input: ReadExplainerInput) => Promise<string>;
+	/** Pending trade confirmations: confirmId → executor + expiry */
+	private readonly pendingTrades = new Map<string, { execute: () => Promise<string>; expiresAtMs: number }>();
 
 	public constructor(private readonly deps: DiscordMessageRouterDependencies) {
 		this.readExplainer = deps.readExplainer ?? defaultReadExplainer;
+		// Purge expired pending trades every 2 minutes
+		setInterval(() => {
+			const now = Date.now();
+			for (const [id, p] of this.pendingTrades) {
+				if (p.expiresAtMs < now) this.pendingTrades.delete(id);
+			}
+		}, 2 * 60 * 1000);
+	}
+
+	/**
+	 * Execute a previously confirmed pending trade. Returns the result message.
+	 * Returns null if the confirmId is unknown or expired.
+	 */
+	public async executePendingTrade(confirmId: string): Promise<string | null> {
+		const pending = this.pendingTrades.get(confirmId);
+		if (!pending) return null;
+		this.pendingTrades.delete(confirmId);
+		if (pending.expiresAtMs < Date.now()) return null;
+		return pending.execute();
+	}
+
+	/** Cancel a pending trade. Returns true if it existed. */
+	public cancelPendingTrade(confirmId: string): boolean {
+		if (!this.pendingTrades.has(confirmId)) return false;
+		this.pendingTrades.delete(confirmId);
+		return true;
+	}
+
+	/** Store a pending trade and return its confirmId. Expires in 5 minutes. */
+	private storePendingTrade(execute: () => Promise<string>): string {
+		const confirmId = crypto.randomUUID();
+		this.pendingTrades.set(confirmId, { execute, expiresAtMs: Date.now() + 5 * 60 * 1000 });
+		return confirmId;
 	}
 
 	/**
 	 * Main entry point for routing a Discord message.
-	 * Always returns a user-facing string and never throws outward.
+	 * Returns either a plain text response or a trade confirmation request.
 	 */
-	public async routeMessage(message: string, discordUserId: DiscordUserId): Promise<string> {
+	public async routeMessage(message: string, discordUserId: DiscordUserId): Promise<RouteResult> {
 		try {
 			if (isDeterministicWriteMessage(message)) {
 				return this.handleWrite(message, discordUserId);
@@ -69,12 +121,13 @@ export class DiscordMessageRouter {
 			const pipeline = classifyMessageIntent(message);
 
 			if (pipeline === 'READ') {
-				return this.handleRead(message);
+				const content = await this.handleRead(message);
+				return { type: 'text', content };
 			}
 
 			return this.handleWrite(message, discordUserId);
 		} catch {
-			return 'Something went wrong while handling your request. Please try again.';
+			return { type: 'text', content: 'Something went wrong while handling your request. Please try again.' };
 		}
 	}
 
@@ -85,7 +138,7 @@ export class DiscordMessageRouter {
 		const searchResults = await this.deps.readService.searchMarketsByText(message);
 		console.log(`[router] Search results: ${searchResults.length}`);
 		const sampleSource = searchResults.length > 0 ? searchResults : liveMarkets;
-		const sampleSummaries = await summarizeUpToThree(this.deps.readService, sampleSource);
+		const sampleSummaries = await summarizeUpToThree(this.deps.readService, sampleSource, message);
 		console.log(`[router] Sample summaries: ${sampleSummaries.map(s => s.question).join(' | ')}`);
 
 		return this.readExplainer({
@@ -96,31 +149,40 @@ export class DiscordMessageRouter {
 		});
 	}
 
-	private async handleWrite(message: string, discordUserId: DiscordUserId): Promise<string> {
+	private async handleWrite(message: string, discordUserId: DiscordUserId): Promise<RouteResult> {
 		const agentOutput = await parseIntent(message, discordUserId);
 		if (agentOutput === null) {
 			const fallback = await this.tryDeterministicWriteFallback(message, discordUserId);
 			if (fallback !== null) {
 				return fallback;
 			}
-			return 'I could not confidently parse that request. Please try again with a clearer command.';
+			return { type: 'text', content: 'I could not confidently parse that request. Please try again with a clearer command.' };
 		}
 
 		// --- get_balance ---
 		if (agentOutput.intent === 'get_balance') {
 			const balance = await this.deps.trader.getBalance(discordUserId);
-			const spent = getSpentToday(discordUserId);
-			const remaining = getRemainingToday(discordUserId);
+			const availableDollars = (balance.availableCents / 100).toFixed(2);
+
+			if (isOwnerExempt(discordUserId)) {
+				return { type: 'text', content: [
+					`**Your Balances**`,
+					`• Available: **$${availableDollars}**`,
+					`• Daily limit: **unlimited** (owner)`,
+				].join('\n') };
+			}
+
+			const spent = await getSpentToday(discordUserId);
+			const remaining = await getRemainingToday(discordUserId);
 			const limitDollars = (DAILY_LIMIT_CENTS / 100).toFixed(2);
 			const spentDollars = (spent / 100).toFixed(2);
 			const remainingDollars = (remaining / 100).toFixed(2);
-			const availableDollars = (balance.availableCents / 100).toFixed(2);
-			return [
+			return { type: 'text', content: [
 				`**Your Balances**`,
 				`• Available: **$${availableDollars}**`,
 				`• Spent today: **$${spentDollars}** / $${limitDollars} daily limit`,
 				`• Remaining today: **$${remainingDollars}**`,
-			].join('\n');
+			].join('\n') };
 		}
 
 		// --- get_trade_history ---
@@ -130,18 +192,18 @@ export class DiscordMessageRouter {
 			const validationContext = await this.deps.buildValidationContext(discordUserId);
 			const linkedAccountId = validationContext.polymarketAccountId;
 			if (!linkedAccountId) {
-				return 'Your Polymarket account is not connected yet. Please connect your account before checking trade history.';
+				return { type: 'text', content: 'Your Polymarket account is not connected yet. Please connect your account before checking trade history.' };
 			}
 
 			const activities = await fetchPolymarketActivity(linkedAccountId, limit);
 			if (activities.length > 0) {
 				const lines = activities.map((activity, index) => formatActivityLine(activity, index));
-				return [`**Your last ${Math.min(limit, activities.length)} activity entries:**`, ...lines].join('\n');
+				return { type: 'text', content: [`**Your last ${Math.min(limit, activities.length)} activity entries:**`, ...lines].join('\n') };
 			}
 
 			const trades = await this.deps.trader.getRecentTrades(discordUserId, limit);
 			if (trades.length === 0) {
-				return 'You have no recent trades yet.';
+				return { type: 'text', content: 'You have no recent trades yet.' };
 			}
 			const lines = trades.map((t, i) => {
 				if (!t.ok) return `${i + 1}. ❌ Trade failed (${t.errorCode})`;
@@ -149,21 +211,22 @@ export class DiscordMessageRouter {
 				const date = new Date(t.executedAtMs).toUTCString();
 				return `${i + 1}. ✅ **${t.outcome}** $${dollars} on \`${t.marketId}\` — ${date}`;
 			});
-			return [`**Your last ${limit} trades:**`, ...lines].join('\n');
+			return { type: 'text', content: [`**Your last ${limit} trades:**`, ...lines].join('\n') };
 		}
 
 		// --- place_bet ---
 		if (agentOutput.intent !== 'place_bet') {
-			return 'I could not confirm a trade placement request. Please restate the trade with explicit action and amount.';
+			return { type: 'text', content: 'I could not confirm a trade placement request. Please restate the trade with explicit action and amount.' };
 		}
 
 		// Enforce daily spend limit before doing anything else (only for BUY — sells return funds)
+		// Owner is exempt from spend limits for testing purposes.
 		const actionForSpend = (agentOutput.intent === 'place_bet' ? (agentOutput.action ?? 'BUY') : 'BUY') as TradeAction;
-		if (actionForSpend === 'BUY' && !canSpend(discordUserId, agentOutput.amountCents)) {
-			const remaining = getRemainingToday(discordUserId);
+		if (actionForSpend === 'BUY' && !isOwnerExempt(discordUserId) && !(await canSpend(discordUserId, agentOutput.amountCents))) {
+			const remaining = await getRemainingToday(discordUserId);
 			const remainingDollars = (remaining / 100).toFixed(2);
 			const limitDollars = (DAILY_LIMIT_CENTS / 100).toFixed(2);
-			return `⛔ Daily limit reached. You can spend **$${remainingDollars}** more today (limit: $${limitDollars}/day).`;
+			return { type: 'text', content: `⛔ Daily limit reached. You can spend **$${remainingDollars}** more today (limit: $${limitDollars}/day).` };
 		}
 
 		const resolvedMarket = await this.deps.readService.getMarketById(agentOutput.marketId);
@@ -189,11 +252,11 @@ export class DiscordMessageRouter {
 
 		const validation = validateAgentOutput(effectiveIntent, validationContext);
 		if (!validation.ok) {
-			return mapValidationErrorToUserMessage(validation.error.code);
+			return { type: 'text', content: mapValidationErrorToUserMessage(validation.error.code) };
 		}
 
 		if (effectiveMarket === null) {
-			return mapValidationErrorToUserMessage('INVALID_MARKET');
+			return { type: 'text', content: mapValidationErrorToUserMessage('INVALID_MARKET') };
 		}
 
 		const polymarketAccountId = validationContext.polymarketAccountId as NonNullable<
@@ -211,37 +274,41 @@ export class DiscordMessageRouter {
 			nowMs: this.deps.nowMs(),
 		});
 
-		// Execute the trade via CLOB
-		const tradeResult = await this.deps.trader.placeTrade(tradeRequest);
-		if (tradeResult.ok && actionForSpend === 'BUY') {
-			recordSpend(discordUserId, Number(effectiveIntent.amountCents));
-		}
-		return formatTradeResultMessage(tradeResult, {
+		// Store pending trade and return confirmation prompt
+		const amountCentsNum = Number(effectiveIntent.amountCents);
+		const confirmId = this.storePendingTrade(async () => {
+			const tradeResult = await this.deps.trader.placeTrade(tradeRequest);
+			if (tradeResult.ok && actionForSpend === 'BUY') {
+				await recordSpend(discordUserId, amountCentsNum);
+			}
+			return formatTradeResultMessage(tradeResult, {
+				marketQuestion: effectiveMarket.question,
+				outcome: effectiveIntent.outcome,
+				action: actionForSpend,
+				amountCents: amountCentsNum,
+			});
+		});
+
+		return {
+			type: 'confirm',
+			confirmId,
 			marketQuestion: effectiveMarket.question,
 			outcome: effectiveIntent.outcome,
 			action: actionForSpend,
-			amountCents: Number(effectiveIntent.amountCents),
-		});
+			amountDollars: (amountCentsNum / 100).toFixed(2),
+		};
 	}
 
 	private async tryDeterministicWriteFallback(
 		message: string,
 		discordUserId: DiscordUserId,
-	): Promise<string | null> {
+	): Promise<RouteResult | null> {
 		const normalized = message.trim().toLowerCase();
 
 		if (/\b(past|last|recent)\b.*\btrades?\b|\btrade\s+history\b/.test(normalized)) {
 			const wordToNumber: Record<string, number> = {
-				one: 1,
-				two: 2,
-				three: 3,
-				four: 4,
-				five: 5,
-				six: 6,
-				seven: 7,
-				eight: 8,
-				nine: 9,
-				ten: 10,
+				one: 1, two: 2, three: 3, four: 4, five: 5,
+				six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
 			};
 
 			const numericMatch = normalized.match(/\b(last|past)\s+(\d+)\s+trades?\b/);
@@ -254,7 +321,7 @@ export class DiscordMessageRouter {
 
 			const trades = await this.deps.trader.getRecentTrades(discordUserId, limit);
 			if (trades.length === 0) {
-				return 'You have no recent trades yet.';
+				return { type: 'text', content: 'You have no recent trades yet.' };
 			}
 
 			const lines = trades.map((trade, index) => {
@@ -264,7 +331,7 @@ export class DiscordMessageRouter {
 				return `${index + 1}. ✅ **${trade.outcome}** $${dollars} on \`${trade.marketId}\` — ${date}`;
 			});
 
-			return [`**Your last ${limit} trades:**`, ...lines].join('\n');
+			return { type: 'text', content: [`**Your last ${limit} trades:**`, ...lines].join('\n') };
 		}
 
 		const amountMatch = normalized.match(/\$\s*(\d+(?:\.\d{1,2})?)/)
@@ -288,7 +355,7 @@ export class DiscordMessageRouter {
 
 		const amountDollars = Number(amountMatch[1]);
 		if (!Number.isFinite(amountDollars) || amountDollars <= 0) {
-			return 'The trade amount is invalid. Please provide a positive amount.';
+			return { type: 'text', content: 'The trade amount is invalid. Please provide a positive amount.' };
 		}
 
 		const amountCents = Math.round(amountDollars * 100);
@@ -320,7 +387,7 @@ export class DiscordMessageRouter {
 		}
 
 		if (!selectedMarket) {
-			return 'I could not find an active matching market right now. Please specify the market ID.';
+			return { type: 'text', content: 'I could not find an active matching market right now. Please specify the market ID.' };
 		}
 		const pseudoIntent = {
 			intent: 'place_bet' as const,
@@ -332,11 +399,11 @@ export class DiscordMessageRouter {
 			rawText: message,
 		};
 
-		if (action === 'BUY' && !canSpend(discordUserId, pseudoIntent.amountCents)) {
-			const remaining = getRemainingToday(discordUserId);
+		if (action === 'BUY' && !isOwnerExempt(discordUserId) && !(await canSpend(discordUserId, pseudoIntent.amountCents))) {
+			const remaining = await getRemainingToday(discordUserId);
 			const remainingDollars = (remaining / 100).toFixed(2);
 			const limitDollars = (DAILY_LIMIT_CENTS / 100).toFixed(2);
-			return `⛔ Daily limit reached. You can spend **$${remainingDollars}** more today (limit: $${limitDollars}/day).`;
+			return { type: 'text', content: `⛔ Daily limit reached. You can spend **$${remainingDollars}** more today (limit: $${limitDollars}/day).` };
 		}
 
 		const baseValidationContext = await this.deps.buildValidationContext(discordUserId);
@@ -352,7 +419,7 @@ export class DiscordMessageRouter {
 
 		const validation = validateAgentOutput(pseudoIntent, validationContext);
 		if (!validation.ok) {
-			return mapValidationErrorToUserMessage(validation.error.code);
+			return { type: 'text', content: mapValidationErrorToUserMessage(validation.error.code) };
 		}
 
 		const polymarketAccountId = validationContext.polymarketAccountId as NonNullable<
@@ -370,17 +437,29 @@ export class DiscordMessageRouter {
 			nowMs: this.deps.nowMs(),
 		});
 
-		// Execute the trade via CLOB
-		const tradeResult = await this.deps.trader.placeTrade(tradeRequest);
-		if (tradeResult.ok && action === 'BUY') {
-			recordSpend(discordUserId, Number(pseudoIntent.amountCents));
-		}
-		return formatTradeResultMessage(tradeResult, {
+		// Store pending trade and return confirmation prompt
+		const amountCentsNum = Number(pseudoIntent.amountCents);
+		const confirmId = this.storePendingTrade(async () => {
+			const tradeResult = await this.deps.trader.placeTrade(tradeRequest);
+			if (tradeResult.ok && action === 'BUY') {
+				await recordSpend(discordUserId, amountCentsNum);
+			}
+			return formatTradeResultMessage(tradeResult, {
+				marketQuestion: selectedMarket.question,
+				outcome: pseudoIntent.outcome,
+				action: pseudoIntent.action,
+				amountCents: amountCentsNum,
+			});
+		});
+
+		return {
+			type: 'confirm',
+			confirmId,
 			marketQuestion: selectedMarket.question,
 			outcome: pseudoIntent.outcome,
 			action: pseudoIntent.action,
-			amountCents: Number(pseudoIntent.amountCents),
-		});
+			amountDollars: (amountCentsNum / 100).toFixed(2),
+		};
 	}
 }
 
@@ -392,13 +471,17 @@ function formatTradeResultMessage(
 	const actionLabel = context.action === 'SELL' ? 'Sold' : 'Bought';
 	const actionVerb = context.action === 'SELL' ? 'SELL' : 'BUY';
 	if (result.ok) {
+		const isTxHash = result.tradeId.startsWith('0x');
+		const tradeIdLine = isTxHash
+			? `• Trade: [${result.tradeId.substring(0, 10)}…${result.tradeId.slice(-6)}](https://polygonscan.com/tx/${result.tradeId})`
+			: `• Trade ID: \`${result.tradeId}\``;
 		return [
 			`✅ **${actionLabel}!**`,
 			`• Market: **${context.marketQuestion}**`,
 			`• Action: **${actionVerb}**`,
 			`• Side: **${context.outcome}**`,
 			`• Amount: **$${amountDollars}**`,
-			`• Trade ID: \`${result.tradeId}\``,
+			tradeIdLine,
 			`• Time: ${new Date(result.executedAtMs).toUTCString()}`,
 		].join('\n');
 	}
@@ -773,23 +856,40 @@ async function defaultReadExplainer(input: ReadExplainerInput): Promise<string> 
 async function summarizeUpToThree(
 	readService: PolymarketReadService,
 	markets: readonly { id: MarketSummary['id'] }[],
+	query?: string
 ): Promise<readonly MarketSummary[]> {
-	// First, get all market summaries to enable smart sorting
+	// Get all market summaries
 	const allSummaries = await Promise.all(
 		markets.slice(0, 15).map((market) => readService.summarizeMarket(market.id)),
 	);
 	const validSummaries = allSummaries.filter((summary): summary is MarketSummary => summary !== null);
 
-	// Prioritize outright winner/series markets over prop markets
-	// (e.g., "KTC vs DRXC" over "Game 4 Winner" or "Handicap -2.5")
-	const sorted = validSummaries.sort((a, b) => {
-		const aIsProp = isPropMarket(a.question);
-		const bIsProp = isPropMarket(b.question);
-		if (aIsProp !== bIsProp) return aIsProp ? 1 : -1; // outright first
-		return 0; // preserve original order
-	});
+	// 1. Exact/strong match (active) always first
+	let bestActive: MarketSummary | undefined;
+	if (query) {
+		const q = query.toLowerCase();
+		bestActive = validSummaries.find(
+			m => m.status === 'active' && m.question.toLowerCase().includes(q)
+		);
+	}
+	if (!bestActive) {
+		bestActive = validSummaries.find(m => m.status === 'active');
+	}
 
-	return sorted.slice(0, 3);
+	// 2. Fill with other active, then closed, but never duplicate
+	const rest = validSummaries
+		.filter(m => m !== bestActive)
+		.sort((a, b) => {
+			if (a.status === 'active' && b.status !== 'active') return -1;
+			if (a.status !== 'active' && b.status === 'active') return 1;
+			const aIsProp = isPropMarket(a.question);
+			const bIsProp = isPropMarket(b.question);
+			if (aIsProp !== bIsProp) return aIsProp ? 1 : -1;
+			return 0;
+		});
+
+	const result = bestActive ? [bestActive, ...rest] : rest;
+	return result.slice(0, 3);
 }
 
 /**

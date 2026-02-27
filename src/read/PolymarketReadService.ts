@@ -36,6 +36,10 @@ export interface MarketSummary {
 	readonly outcomePrices: readonly number[];
 	/** Total trading volume in USD. */
 	readonly volume: number;
+	/** URL-friendly slug for constructing Olympus/Polymarket links. */
+	readonly slug?: string;
+	/** Parent event slug — used for Polymarket event URLs and Olympus search. */
+	readonly eventSlug?: string;
 }
 
 /**
@@ -90,6 +94,8 @@ export class PolymarketReadService {
 			outcomeCount: market.outcomes.length,
 			outcomePrices: market.outcomePrices,
 			volume: market.volume,
+			slug: market.slug,
+			eventSlug: market.eventSlug,
 		};
 	}
 }

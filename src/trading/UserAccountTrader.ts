@@ -95,7 +95,9 @@ export class UserAccountTrader implements Trader {
 				executedAtMs: execution.executedAtMs,
 			};
 		} catch (error: unknown) {
+			console.error('❌ placeTrade execution error:', error);
 			const errorCode = mapExecutionErrorToTradeErrorCode(error);
+			console.error(`   ↳ Mapped to error code: ${errorCode}`);
 			return {
 				ok: false,
 				errorCode,

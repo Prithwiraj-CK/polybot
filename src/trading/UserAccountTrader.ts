@@ -21,6 +21,8 @@ export interface ExecuteTradeParams {
 	readonly action: TradeAction;
 	readonly amountCents: UsdCents;
 	readonly idempotencyKey: string;
+	/** Discord user ID — used to resolve per-user CLOB credentials. */
+	readonly discordUserId?: DiscordUserId;
 }
 
 /**
@@ -66,7 +68,7 @@ export class UserAccountTrader implements Trader {
 		private readonly resolveAccountId: (
 			discordUserId: DiscordUserId,
 		) => Promise<PolymarketAccountId | null>,
-	) {}
+	) { }
 
 	/**
 	 * Executes a validated request in the context of the user's Polymarket account.
@@ -82,6 +84,7 @@ export class UserAccountTrader implements Trader {
 					action: request.action,
 					amountCents: request.amountCents,
 					idempotencyKey: request.idempotencyKey,
+					discordUserId: request.identity.discordUserId,
 				},
 			);
 
@@ -179,6 +182,8 @@ function mapExecutionErrorToTradeErrorCode(error: unknown): TradeErrorCode {
 				return 'ABUSE_BLOCKED';
 			case 'LIMIT_EXCEEDED':
 				return 'LIMIT_EXCEEDED';
+			case 'ACCOUNT_NOT_CONNECTED':
+				return 'INTERNAL_ERROR';
 			default:
 				return 'INTERNAL_ERROR';
 		}

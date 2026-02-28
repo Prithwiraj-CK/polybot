@@ -25,13 +25,13 @@ import crypto from 'crypto';
 export type RouteResult =
 	| { readonly type: 'text'; readonly content: string }
 	| {
-			readonly type: 'confirm';
-			readonly confirmId: string;
-			readonly marketQuestion: string;
-			readonly outcome: 'YES' | 'NO';
-			readonly action: TradeAction;
-			readonly amountDollars: string;
-	  };
+		readonly type: 'confirm';
+		readonly confirmId: string;
+		readonly marketQuestion: string;
+		readonly outcome: 'YES' | 'NO';
+		readonly action: TradeAction;
+		readonly amountDollars: string;
+	};
 
 /**
  * Data passed to the READ explainer.
@@ -165,11 +165,13 @@ export class DiscordMessageRouter {
 			const availableDollars = (balance.availableCents / 100).toFixed(2);
 
 			if (isOwnerExempt(discordUserId)) {
-				return { type: 'text', content: [
-					`**Your Balances**`,
-					`• Available: **$${availableDollars}**`,
-					`• Daily limit: **unlimited** (owner)`,
-				].join('\n') };
+				return {
+					type: 'text', content: [
+						`**Your Balances**`,
+						`• Available: **$${availableDollars}**`,
+						`• Daily limit: **unlimited** (owner)`,
+					].join('\n')
+				};
 			}
 
 			const spent = await getSpentToday(discordUserId);
@@ -177,12 +179,14 @@ export class DiscordMessageRouter {
 			const limitDollars = (DAILY_LIMIT_CENTS / 100).toFixed(2);
 			const spentDollars = (spent / 100).toFixed(2);
 			const remainingDollars = (remaining / 100).toFixed(2);
-			return { type: 'text', content: [
-				`**Your Balances**`,
-				`• Available: **$${availableDollars}**`,
-				`• Spent today: **$${spentDollars}** / $${limitDollars} daily limit`,
-				`• Remaining today: **$${remainingDollars}**`,
-			].join('\n') };
+			return {
+				type: 'text', content: [
+					`**Your Balances**`,
+					`• Available: **$${availableDollars}**`,
+					`• Spent today: **$${spentDollars}** / $${limitDollars} daily limit`,
+					`• Remaining today: **$${remainingDollars}**`,
+				].join('\n')
+			};
 		}
 
 		// --- get_trade_history ---
@@ -914,7 +918,7 @@ function isPropMarket(question: string): boolean {
 function mapValidationErrorToUserMessage(errorCode: ValidationErrorCode): string {
 	switch (errorCode) {
 		case 'ACCOUNT_NOT_CONNECTED':
-			return 'Your Polymarket account is not connected yet. Please connect your account before placing a trade.';
+			return 'You need to set up your trading credentials first. Use `/setup-trading` with your private key and proxy wallet to get started.';
 		case 'INVALID_MARKET':
 			return 'That market could not be found. Please check the market and try again.';
 		case 'MARKET_NOT_ACTIVE':

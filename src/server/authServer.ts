@@ -6,6 +6,7 @@ import path from 'path';
 import { ethers } from 'ethers';
 import {
   accountLinkPersistenceService,
+  executionGateway,
 } from '../wire';
 import type { DiscordUserId, PolymarketAccountId } from '../types';
 
@@ -199,6 +200,120 @@ app.get('/connect', (_req: Request, res: Response) => {
 
 app.get('/trade-confirm', (_req: Request, res: Response) => {
   res.sendFile(path.join(__dirname, '..', '..', 'public', 'trade-confirm.html'));
+});
+
+app.get('/setup-trading', (_req: Request, res: Response) => {
+  res.sendFile(path.join(__dirname, '..', '..', 'public', 'setup-trading.html'));
+});
+
+/* ---------- 5. Setup trading credentials (called by web page) ----- */
+
+app.post('/api/setup-trading', async (req: Request, res: Response) => {
+  const { sessionId, privateKey, proxyWallet } = req.body as {
+    sessionId?: string;
+    privateKey?: string;
+    proxyWallet?: string;
+  };
+
+  if (!sessionId || !privateKey || !proxyWallet) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  // Validate formats
+  if (!/^0x[a-fA-F0-9]{40}$/i.test(proxyWallet)) {
+    return res.status(400).json({ error: 'Invalid proxy wallet address format' });
+  }
+  if (!/^0x[a-fA-F0-9]{64}$/.test(privateKey)) {
+    return res.status(400).json({ error: 'Invalid private key format. Must be 0x-prefixed, 64 hex characters.' });
+  }
+
+  const session = sessions.get(sessionId);
+  if (!session) {
+    return res.status(404).json({ error: 'Session not found or expired. Please use /setup-trading in Discord to get a new link.' });
+  }
+  if (session.used) {
+    return res.status(410).json({ error: 'This link was already used. Please use /setup-trading in Discord to get a new link.' });
+  }
+  if (session.expiresAtMs < Date.now()) {
+    return res.status(410).json({ error: 'This link has expired. Please use /setup-trading in Discord to get a new link.' });
+  }
+
+  // Mark session as used
+  session.used = true;
+
+  const credentialStore = executionGateway.getCredentialStore();
+  if (!credentialStore) {
+    return res.status(500).json({ error: 'Trading credential store is not configured on this server.' });
+  }
+
+  try {
+    // Build a wallet from the private key
+    const wallet = new ethers.Wallet(privateKey) as ethers.Wallet & {
+      _signTypedData: typeof ethers.Wallet.prototype.signTypedData;
+    };
+    wallet._signTypedData = wallet.signTypedData.bind(wallet);
+
+    console.log(`🔑 Deriving API credentials for ${session.discordUserId} (EOA: ${wallet.address})...`);
+
+    // Derive API credentials — same approach as the leader wallet
+    const { ClobClient: ClobClientClass, Chain: ChainEnum } = await import('@polymarket/clob-client');
+    const tempClient = new ClobClientClass(
+      'https://clob.polymarket.com',
+      ChainEnum.POLYGON,
+      wallet as any,
+    );
+
+    const apiCreds = await tempClient.createOrDeriveApiKey() as unknown as {
+      key: string;
+      secret: string;
+      passphrase: string;
+    };
+
+    if (!apiCreds.key || !apiCreds.secret || !apiCreds.passphrase) {
+      return res.status(400).json({
+        error: 'Could not derive API credentials. Make sure you are using your Phantom Polygon private key.',
+      });
+    }
+
+    console.log(`✅ API credentials derived successfully (key: ${apiCreds.key.slice(0, 8)}...)`);
+
+    await credentialStore.saveCredentials(session.discordUserId, {
+      apiKey: apiCreds.key,
+      apiSecret: apiCreds.secret,
+      passphrase: apiCreds.passphrase,
+      privateKey,
+      proxyWallet,
+    });
+
+    // Evict cached ClobClient
+    executionGateway.evictUserClient(session.discordUserId);
+
+    // Auto-link the proxy wallet as their Polymarket account
+    await accountLinkPersistenceService.persistLink(
+      session.discordUserId,
+      proxyWallet.toLowerCase() as PolymarketAccountId,
+      Date.now(),
+    );
+
+    console.log(`🔑 Trading setup complete for ${session.discordUserId}`);
+
+    return res.json({
+      success: true,
+      discordUserId: session.discordUserId,
+      proxyWallet: proxyWallet.toLowerCase(),
+    });
+  } catch (err: any) {
+    console.error('❌ Setup trading failed:', err?.response?.data || err?.message || err);
+
+    // Check for specific CLOB errors
+    if (err?.response?.data?.error === 'Could not create api key') {
+      return res.status(400).json({
+        error: 'This wallet is not registered on Polymarket. Make sure you export the private key from reveal.magic.link/polymarket (your Polymarket embedded wallet), NOT from MetaMask or Phantom.',
+      });
+    }
+
+    return res.status(500).json({ error: 'Failed to set up trading. Please try again.' });
+  }
 });
 
 app.get('/api/trade-session/:sessionId', (req: Request, res: Response) => {

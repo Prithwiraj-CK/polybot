@@ -19,6 +19,7 @@ import {
   type ExecuteTradeResponse,
 } from './trading/UserAccountTrader';
 import { SupabaseAccountLinkStore } from './storage/SupabaseAccountLinkStore';
+import { SupabaseUserCredentialStore, type UserClobCredentials } from './storage/SupabaseUserCredentialStore';
 import type { Balance, DiscordUserId, Market, PolymarketAccountId, TradeResult } from './types';
 import { ClobClient, Chain, Side, OrderType, AssetType } from '@polymarket/clob-client';
 import { SignatureType } from '@polymarket/order-utils';
@@ -129,7 +130,14 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
     'https://1rpc.io/matic',
   ].filter((value): value is string => Boolean(value && value.length > 0));
 
-  private readonly clobClient: ClobClient;
+  /** Leader (fallback) ClobClient — created from .env credentials */
+  private readonly leaderClobClient: ClobClient;
+  /** Per-user ClobClient cache: discordUserId → { client, createdAtMs } */
+  private readonly userClientCache = new Map<DiscordUserId, { client: ClobClient; createdAtMs: number }>();
+  /** Cache TTL: 30 minutes */
+  private static readonly CLIENT_CACHE_TTL_MS = 30 * 60 * 1000;
+  /** User credential store (null if encryption key not configured) */
+  private readonly credentialStore: SupabaseUserCredentialStore | null;
 
   public constructor() {
     const privateKey = process.env.WALLET_PRIVATE_KEY;
@@ -152,7 +160,7 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
     wallet._signTypedData = wallet.signTypedData.bind(wallet);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- CLOB client expects ethers v5 Wallet shape
-    this.clobClient = new ClobClient(
+    this.leaderClobClient = new ClobClient(
       'https://clob.polymarket.com',
       Chain.POLYGON,
       wallet as any,
@@ -163,27 +171,111 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
 
     const maskedEoa = `${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}`;
     const maskedProxy = `${proxyWallet.slice(0, 6)}…${proxyWallet.slice(-4)}`;
-    console.log(`🔗 ClobPolymarketExecutionGateway initialized (EOA: ${maskedEoa}, Proxy: ${maskedProxy})`);
+    console.log(`🔗 ClobPolymarketExecutionGateway initialized — leader wallet (EOA: ${maskedEoa}, Proxy: ${maskedProxy})`);
+
+    // Initialize per-user credential store if encryption key is configured
+    try {
+      this.credentialStore = new SupabaseUserCredentialStore();
+      console.log('🔐 Per-user credential store initialized');
+    } catch {
+      console.warn('⚠️ Per-user credential store not available (missing CREDENTIAL_ENCRYPTION_KEY). All trades will use leader wallet.');
+      this.credentialStore = null;
+    }
 
     // Ensure USDC allowance is set for exchange contracts (one-time on-chain approval)
-    this.ensureAllowance().catch((err) => {
+    this.ensureAllowance(this.leaderClobClient).catch((err) => {
       console.error('⚠️ Failed to set USDC allowance — trades may fail:', err);
     });
+  }
+
+  /**
+   * Get the user credential store (for use by slash commands).
+   */
+  public getCredentialStore(): SupabaseUserCredentialStore | null {
+    return this.credentialStore;
+  }
+
+  /**
+   * Build a ClobClient from user credentials.
+   */
+  private buildClobClientFromCredentials(creds: UserClobCredentials): ClobClient {
+    const wallet = new ethers.Wallet(creds.privateKey) as ethers.Wallet & {
+      _signTypedData: typeof ethers.Wallet.prototype.signTypedData;
+    };
+    wallet._signTypedData = wallet.signTypedData.bind(wallet);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- CLOB client expects ethers v5 Wallet shape
+    return new ClobClient(
+      'https://clob.polymarket.com',
+      Chain.POLYGON,
+      wallet as any,
+      { key: creds.apiKey, secret: creds.apiSecret, passphrase: creds.passphrase },
+      SignatureType.POLY_GNOSIS_SAFE,
+      creds.proxyWallet,
+    );
+  }
+
+  /**
+   * Resolve the ClobClient for a given Discord user.
+   * Returns user-specific client if credentials are stored, otherwise falls back to leader.
+   */
+  public async getClobClientForUser(discordUserId: DiscordUserId | null): Promise<{ client: ClobClient; isLeader: boolean }> {
+    if (!discordUserId || !this.credentialStore) {
+      return { client: this.leaderClobClient, isLeader: true };
+    }
+
+    // Check cache first
+    const cached = this.userClientCache.get(discordUserId);
+    if (cached && (Date.now() - cached.createdAtMs) < ClobPolymarketExecutionGateway.CLIENT_CACHE_TTL_MS) {
+      return { client: cached.client, isLeader: false };
+    }
+
+    // Look up credentials
+    try {
+      const creds = await this.credentialStore.getCredentials(discordUserId);
+      if (!creds) {
+        return { client: this.leaderClobClient, isLeader: true };
+      }
+
+      const client = this.buildClobClientFromCredentials(creds);
+      this.userClientCache.set(discordUserId, { client, createdAtMs: Date.now() });
+
+      const wallet = new ethers.Wallet(creds.privateKey);
+      const maskedEoa = `${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}`;
+      console.log(`🔑 Using per-user ClobClient for ${discordUserId} (EOA: ${maskedEoa})`);
+
+      // Set USDC allowance for this user's wallet (fire-and-forget)
+      this.ensureAllowance(client).catch((err) => {
+        console.warn(`⚠️ Failed to set USDC allowance for ${discordUserId}:`, err);
+      });
+
+      return { client, isLeader: false };
+    } catch (err) {
+      console.error(`⚠️ Failed to load credentials for ${discordUserId}, falling back to leader:`, err);
+      return { client: this.leaderClobClient, isLeader: true };
+    }
+  }
+
+  /**
+   * Invalidate the cached ClobClient for a user (e.g., after /remove-trading).
+   */
+  public evictUserClient(discordUserId: DiscordUserId): void {
+    this.userClientCache.delete(discordUserId);
   }
 
   /**
    * Check and set USDC balance allowance for the Polymarket exchange contracts.
    * This is an idempotent operation — if allowance is already max, it's a no-op on-chain.
    */
-  private async ensureAllowance(): Promise<void> {
+  private async ensureAllowance(client: ClobClient): Promise<void> {
     try {
       const collateralParams = { asset_type: AssetType.COLLATERAL };
-      const current = await this.clobClient.getBalanceAllowance(collateralParams) as unknown as Record<string, unknown>;
+      const current = await client.getBalanceAllowance(collateralParams) as unknown as Record<string, unknown>;
 
       // CLOB client may return an HTTP error object instead of { balance, allowance }
       if (typeof current.status === 'number' && current.status >= 400) {
         console.warn('⚠️ getBalanceAllowance returned error, updating allowance anyway...');
-        await this.clobClient.updateBalanceAllowance(collateralParams);
+        await client.updateBalanceAllowance(collateralParams);
         console.log('✅ USDC allowance updated');
         return;
       }
@@ -197,7 +289,7 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
       const threshold = BigInt('1000000000'); // 1000 USDC in 6 decimals
       if (allowanceBigInt < threshold) {
         console.log('🔓 Setting max USDC allowance for Polymarket exchange...');
-        await this.clobClient.updateBalanceAllowance(collateralParams);
+        await client.updateBalanceAllowance(collateralParams);
         console.log('✅ USDC allowance updated successfully');
       } else {
         console.log('✅ USDC allowance already sufficient');
@@ -206,7 +298,7 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
       console.error('⚠️ Allowance check/update error:', err);
       // Try to set allowance anyway
       try {
-        await this.clobClient.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+        await client.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
         console.log('✅ USDC allowance updated (fallback)');
       } catch (updateErr) {
         console.error('❌ Could not update allowance:', updateErr);
@@ -218,13 +310,23 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
     _polymarketAccountId: PolymarketAccountId,
     params: ExecuteTradeParams,
   ): Promise<ExecuteTradeResponse> {
+    // Resolve the correct ClobClient for this user (per-user or leader fallback)
+    const { client: clobClient, isLeader } = await this.getClobClientForUser(params.discordUserId ?? null);
+    if (isLeader && params.discordUserId) {
+      // User has NOT registered via /setup-trading — block the trade
+      throw {
+        code: 'ACCOUNT_NOT_CONNECTED',
+        message: 'You need to set up your own trading credentials first. Use `/setup-trading` to register your wallet.',
+      };
+    }
+
     const conditionId = String(params.marketId);
 
     // 1. Resolve token ID for this market
     const tokenId = await this.resolveTokenId(conditionId, params.outcome);
 
     // 2. Fetch the correct tick size from the CLOB (varies per market: 0.1 / 0.01 / 0.001 / 0.0001)
-    const tickSize = await this.clobClient.getTickSize(tokenId);
+    const tickSize = await clobClient.getTickSize(tokenId);
     console.log(`⏱️  Tick size for token ${tokenId.substring(0, 12)}...: ${tickSize}`);
 
     // 3. Amount in dollars (CLOB expects dollars for BUY, shares for SELL)
@@ -242,7 +344,7 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
 
     let result: unknown;
     try {
-      result = await this.clobClient.createAndPostMarketOrder(
+      result = await clobClient.createAndPostMarketOrder(
         {
           tokenID: tokenId,
           amount: amountDollars,
@@ -332,7 +434,8 @@ class ClobPolymarketExecutionGateway implements PolymarketExecutionGateway {
       outcome === 'YES' ? ['up', 'yes'] : ['down', 'no'];
 
     try {
-      const clobMarket = await this.clobClient.getMarket(conditionId);
+      // Use leader client for market metadata lookups (token IDs are global, not account-specific)
+      const clobMarket = await this.leaderClobClient.getMarket(conditionId);
       const raw = clobMarket as Record<string, unknown>;
       const tokens = raw.tokens as
         | Array<{ token_id: string; outcome: string }>
@@ -524,10 +627,11 @@ export const aiReadExplainer = createAiReadExplainer();
 
 /**
  * WRITE pipeline — requires backend (Supabase) for production.
- * Currently wired with in-memory stubs for local development.
+ * The gateway now supports per-user CLOB clients with leader fallback.
  */
+export const executionGateway = new ClobPolymarketExecutionGateway();
 export const trader = new UserAccountTrader(
-  new ClobPolymarketExecutionGateway(),
+  executionGateway,
   async (discordUserId: DiscordUserId) => {
     const linked = await accountLinkPersistenceService.getLinkedAccount(discordUserId);
     if (!linked.ok) {

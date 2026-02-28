@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PolyBot — Setup Trading</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .card {
+      background: #16213e;
+      border-radius: 16px;
+      padding: 40px;
+      max-width: 520px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+
+    .card h1 {
+      font-size: 24px;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+
+    .card .subtitle {
+      color: #a0a0b8;
+      margin-bottom: 20px;
+      font-size: 14px;
+    }
+
+    .input-group {
+      margin-bottom: 18px;
+      text-align: left;
+    }
+
+    .input-group label {
+      display: block;
+      font-size: 14px;
+      color: #c0c0d8;
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+
+    .input-group input {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #2a2a4a;
+      border-radius: 8px;
+      background: #0f1629;
+      color: #e0e0e0;
+      font-family: monospace;
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .input-group input:focus {
+      border-color: #667eea;
+    }
+
+    .input-group input::placeholder {
+      color: #4a4a6a;
+    }
+
+    .input-group .where {
+      font-size: 12px;
+      color: #667eea;
+      margin-top: 5px;
+      line-height: 1.5;
+    }
+
+    .input-group .where b {
+      color: #8899ff;
+    }
+
+    .btn {
+      display: inline-block;
+      padding: 14px 32px;
+      border: none;
+      border-radius: 10px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      width: 100%;
+      margin-top: 10px;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      color: #fff;
+    }
+
+    .btn-primary:hover {
+      opacity: 0.9;
+      transform: translateY(-1px);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .status {
+      margin-top: 20px;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 14px;
+      display: none;
+      line-height: 1.6;
+    }
+
+    .status.error {
+      display: block;
+      background: #3d1f1f;
+      color: #ff6b6b;
+    }
+
+    .status.success {
+      display: block;
+      background: #1f3d2a;
+      color: #6bff8a;
+    }
+
+    .status.info {
+      display: block;
+      background: #1f2d3d;
+      color: #6bb3ff;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid #fff;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      vertical-align: middle;
+      margin-right: 8px;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    .info-box {
+      background: #0f1629;
+      border: 1px solid #2a2a4a;
+      border-radius: 8px;
+      padding: 14px;
+      margin-bottom: 20px;
+      text-align: left;
+      font-size: 13px;
+      color: #8888bb;
+      line-height: 1.7;
+    }
+
+    .info-box b {
+      color: #c0c0d8;
+    }
+
+    .info-box a {
+      color: #6bb3ff;
+      text-decoration: none;
+    }
+
+    .info-box a:hover {
+      text-decoration: underline;
+    }
+
+    .warning-box {
+      background: #3d2d1f;
+      border: 1px solid #664422;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 20px;
+      text-align: left;
+      font-size: 12px;
+      color: #ffbb6b;
+      line-height: 1.5;
+    }
+
+    .divider {
+      height: 1px;
+      background: #2a2a4a;
+      margin: 20px 0;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <h1>🔑 PolyBot — Setup Trading</h1>
+    <p class="subtitle">Connect your Polymarket wallet to trade through the bot</p>
+
+    <div class="info-box">
+      <b>You need 2 things:</b><br>
+      1️⃣ <b>Private Key</b> — from <a href="https://reveal.magic.link/polymarket"
+        target="_blank">reveal.magic.link/polymarket</a>
+      (log in with the email/method you used on Polymarket)<br>
+      2️⃣ <b>Proxy Wallet</b> — from <a href="https://polymarket.com/settings?tab=builder"
+        target="_blank">polymarket.com → Settings → Builder Settings</a>
+    </div>
+
+    <div class="warning-box">
+      ⚠️ Your private key is encrypted before storage. Never share it with anyone else.
+    </div>
+
+    <div class="input-group">
+      <label>1. Polymarket Wallet Private Key</label>
+      <input type="password" id="privateKey" placeholder="0x..." />
+      <div class="where">
+        📍 <b>Where to find:</b> Go to <a href="https://reveal.magic.link/polymarket" target="_blank"
+          style="color:#6bb3ff">reveal.magic.link/polymarket</a> → log in → copy the private key shown.
+        <br>Starts with <b>0x</b> followed by 64 hex characters.
+      </div>
+    </div>
+
+    <div class="input-group">
+      <label>2. Proxy Wallet Address</label>
+      <input type="text" id="proxyWallet" placeholder="0x..." />
+      <div class="where">
+        📍 <b>Where to find:</b> Go to <a href="https://polymarket.com/settings?tab=builder" target="_blank"
+          style="color:#6bb3ff">polymarket.com → Settings → Builder Settings</a> → your proxy/safe address is shown
+        there.
+        <br>Starts with <b>0x</b> followed by 40 hex characters.
+      </div>
+    </div>
+
+    <button class="btn btn-primary" id="setupBtn" onclick="startSetup()">Setup Trading</button>
+    <div class="status" id="status"></div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const sessionId = params.get('session');
+    const statusEl = document.getElementById('status');
+    const setupBtn = document.getElementById('setupBtn');
+
+    function showStatus(msg, type) {
+      statusEl.className = 'status ' + type;
+      statusEl.innerHTML = msg;
+    }
+
+    if (!sessionId) {
+      showStatus('Invalid link — no session ID. Please use <b>/setup-trading</b> in Discord to get a fresh link.', 'error');
+      setupBtn.disabled = true;
+    }
+
+    async function startSetup() {
+      const privateKey = document.getElementById('privateKey').value.trim();
+      const proxyWallet = document.getElementById('proxyWallet').value.trim();
+
+      if (!privateKey) {
+        showStatus('Please enter your Polymarket wallet private key.', 'error');
+        return;
+      }
+      if (!/^0x[a-fA-F0-9]{64}$/.test(privateKey)) {
+        showStatus('Invalid private key format. Must start with <b>0x</b> followed by exactly 64 hex characters.', 'error');
+        return;
+      }
+      if (!proxyWallet) {
+        showStatus('Please enter your proxy wallet address.', 'error');
+        return;
+      }
+      if (!/^0x[a-fA-F0-9]{40}$/i.test(proxyWallet)) {
+        showStatus('Invalid proxy wallet address. Must start with <b>0x</b> followed by exactly 40 hex characters.', 'error');
+        return;
+      }
+
+      setupBtn.disabled = true;
+      showStatus('<span class="spinner"></span> Setting up your trading account... deriving API credentials (may take a few seconds)', 'info');
+
+      try {
+        const res = await fetch('/api/setup-trading', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId, privateKey, proxyWallet }),
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Setup failed');
+        }
+
+        showStatus(
+          '✅ <b>Trading setup complete!</b><br>' +
+          'API credentials derived automatically.<br>' +
+          'You can close this tab and place trades in Discord!',
+          'success'
+        );
+      } catch (err) {
+        showStatus('❌ ' + (err.message || 'Unknown error'), 'error');
+        setupBtn.disabled = false;
+      }
+    }
+  </script>
+</body>
+
+</html>

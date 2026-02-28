@@ -15,6 +15,8 @@ import {
 import { sessions } from '../server/authServer';
 import crypto from 'crypto';
 import type { Trader } from '../types';
+import { ethers } from 'ethers';
+import type { SupabaseUserCredentialStore } from '../storage/SupabaseUserCredentialStore';
 
 export interface AccountLinkCommandDependencies {
 	readonly challengeService: AccountLinkChallengeService;
@@ -22,6 +24,10 @@ export interface AccountLinkCommandDependencies {
 	readonly persistenceService: AccountLinkPersistenceService;
 	readonly trader: Trader;
 	readonly nowMs: () => number;
+	/** Per-user credential store for trading. Null if not configured. */
+	readonly credentialStore?: SupabaseUserCredentialStore | null;
+	/** Callback to evict a user's cached ClobClient after credential changes. */
+	readonly evictUserClient?: (discordUserId: DiscordUserId) => void;
 }
 
 /**
@@ -288,6 +294,55 @@ export async function handleAccountLinkSlashCommand(
 				);
 				break;
 			}
+			case 'setup-trading': {
+				// Create a session for the web-based trading setup flow (same pattern as /connect)
+				const setupSessionId = crypto.randomUUID();
+				const setupNonce = crypto.randomUUID();
+				const setupExpiresAtMs = Date.now() + 10 * 60 * 1000;
+
+				const setupChallengeMessage = [
+					'PolyBot Trading Setup',
+					`Discord User: ${discordUserId}`,
+					`Nonce: ${setupNonce}`,
+					`Expires: ${new Date(setupExpiresAtMs).toISOString()}`,
+				].join('\n');
+
+				sessions.set(setupSessionId, {
+					sessionId: setupSessionId,
+					discordUserId,
+					nonce: setupNonce,
+					challengeMessage: setupChallengeMessage,
+					expiresAtMs: setupExpiresAtMs,
+					used: false,
+				});
+
+				const setupUrl = `${process.env.AUTH_BASE_URL || 'http://localhost:3001'}/setup-trading?session=${setupSessionId}`;
+
+				const setupRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+					new ButtonBuilder()
+						.setLabel('🔑 Setup Trading')
+						.setStyle(ButtonStyle.Link)
+						.setURL(setupUrl),
+				);
+
+				if (interaction.deferred) {
+					await interaction.editReply({
+						content: 'Click the button below to set up your trading credentials.\nYou\'ll need your Polymarket API keys and wallet private key.\nThe link expires in 10 minutes.',
+						components: [setupRow],
+					});
+				} else {
+					await interaction.reply({
+						content: 'Click the button below to set up your trading credentials.\nYou\'ll need your Polymarket API keys and wallet private key.\nThe link expires in 10 minutes.',
+						components: [setupRow],
+						ephemeral: true,
+					});
+				}
+				break;
+			}
+			case 'remove-trading': {
+				await handleRemoveTrading(discordUserId, deps, respond);
+				break;
+			}
 			default:
 				await respond('Unsupported command.');
 		}
@@ -308,6 +363,38 @@ export async function handleAccountLinkSlashCommand(
 			content: 'Unable to process account-link command right now. Please try again.',
 			ephemeral: true,
 		});
+	}
+}
+
+
+
+/**
+ * Handle /remove-trading — deletes stored CLOB credentials.
+ */
+async function handleRemoveTrading(
+	discordUserId: DiscordUserId,
+	deps: AccountLinkCommandDependencies,
+	respond: (content: string) => Promise<void>,
+): Promise<void> {
+	if (!deps.credentialStore) {
+		await respond('❌ Trading credential storage is not configured.');
+		return;
+	}
+
+	try {
+		const deleted = await deps.credentialStore.deleteCredentials(discordUserId);
+		if (deps.evictUserClient) {
+			deps.evictUserClient(discordUserId);
+		}
+
+		if (deleted) {
+			await respond('✅ Your trading credentials have been removed. Trades will now use the leader wallet (if available).');
+		} else {
+			await respond('ℹ️ No trading credentials found for your account.');
+		}
+	} catch (err) {
+		console.error(`❌ remove-trading failed for ${discordUserId}:`, err);
+		await respond('❌ Failed to remove trading credentials. Please try again.');
 	}
 }
 
@@ -343,5 +430,20 @@ export const balanceCommand = new SlashCommandBuilder()
 	.setName('balance')
 	.setDescription('Show your current balance');
 
-export const commands = [connectCommand, verifyCommand, disconnectCommand, statusCommand, balanceCommand];
+export const setupTradingCommand = new SlashCommandBuilder()
+	.setName('setup-trading')
+	.setDescription('Set up your own trading credentials (opens a secure web page)');
 
+export const removeTradingCommand = new SlashCommandBuilder()
+	.setName('remove-trading')
+	.setDescription('Remove your stored trading credentials');
+
+export const commands = [
+	connectCommand,
+	verifyCommand,
+	disconnectCommand,
+	statusCommand,
+	balanceCommand,
+	setupTradingCommand,
+	removeTradingCommand,
+];

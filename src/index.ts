@@ -27,6 +27,7 @@ import {
   trader,
   readService,
   aiReadExplainer,
+  executionGateway,
 } from './wire';
 import { createBuildValidationContext } from './backend/buildValidationContext';
 
@@ -50,6 +51,8 @@ const accountLinkDeps = {
   persistenceService: accountLinkPersistenceService,
   trader,
   nowMs: () => Date.now(),
+  credentialStore: executionGateway.getCredentialStore(),
+  evictUserClient: (discordUserId: DiscordUserId) => executionGateway.evictUserClient(discordUserId),
 };
 
 // ---- Router ----
@@ -70,7 +73,7 @@ client.once('clientReady', () => {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const commandName = interaction.commandName;
-  if (commandName !== 'connect' && commandName !== 'verify' && commandName !== 'disconnect' && commandName !== 'status' && commandName !== 'balance') {
+  if (commandName !== 'connect' && commandName !== 'verify' && commandName !== 'disconnect' && commandName !== 'status' && commandName !== 'balance' && commandName !== 'setup-trading' && commandName !== 'remove-trading') {
     return;
   }
 
@@ -205,7 +208,7 @@ client.on('messageCreate', async (message) => {
         content: '⏰ **Trade confirmation timed out.** Place the order again if you\'d like to proceed.',
         embeds: [],
         components: [],
-      }).catch(() => {});
+      }).catch(() => { });
     }
   } catch {
     await message.reply('Unable to process your request right now. Please try again.');
